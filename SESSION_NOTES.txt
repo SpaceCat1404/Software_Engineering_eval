@@ -1,0 +1,538 @@
+SRS Grader — session notes (2026-07-13)
+========================================
+
+WHAT WAS DONE THIS SESSION
+---------------------------
+1. PDF ingestion added (srs_ingest.py / api/_lib/srs_ingest.py)
+   - Font-size heuristic for headings (>=15.5pt = top-level, >=13.5pt = subsection)
+   - PyMuPDF find_tables() for real PDF tables
+   - Bullet-style requirements ("HCM-F-001 -- The system shall...") folded into
+     synthetic Req-ID tables so completeness/plagiarism checks need no
+     format-specific code
+   - Fixed: header text wraps mid-word in PDF tables ("Req\nID") -- normalized
+     comparisons so real requirement tables aren't missed
+   - Fixed: NFR bullets have a parenthetical tag before the dash
+     ("HCM-NF-001 (Performance) -- ...") that FR bullets don't -- regex now
+     tolerates it. This was causing NFR counts to silently read 0.
+
+2. srs_completeness.py fixes
+   - Subsection/word-count checks now sum a section + descendants (some
+     PDF exports give "1.1 Purpose" its own heading instead of inline text
+     like the docx template does)
+   - NFR counting now sums across 5.x subsections (was only exact "5"),
+     excluding the 5.1.x security subtree to avoid double-counting
+
+3. Fixed top-level srs_table_plagiarism.py -- it was BROKEN (imported from a
+   nonexistent lib/ folder). Synced the more complete api/_lib version
+   (has boilerplate-row filtering across teams) to top level.
+
+4. Frontend rebuilt as multi-page app (styled after temp/ ISFCR Labs reference):
+   - /            Dashboard: stat tiles, team cards, multi-file upload,
+                  "Evaluate student_submissions/ folder" button
+   - /teams/[id]  Detail: FR/NFR/security stat cards, issues list,
+                  collapsible "Document contents" cross-check panel
+                  (shows raw extracted headings/text/tables so a TA can
+                  manually verify a MISSING flag against the real doc)
+   - /compare     Plagiarism check, moved off the dashboard
+
+5. New backend endpoints (api/index.py)
+   - GET  /api/teams/{id}       -- now also returns full ingested sections
+   - POST /api/evaluate-local   -- dev-only: scans student_submissions/ on
+                                    disk server-side, grades everything in
+                                    one call. Only works with local blob
+                                    storage (no BLOB_READ_WRITE_TOKEN set).
+
+6. batch_grade.py (new) -- CLI: `python batch_grade.py student_submissions`
+   grades a whole folder + runs plagiarism check, no web UI needed.
+
+7. Local dev harness (no Vercel account needed to test):
+   - api/_lib/blob_store.py falls back to local JSON files under
+     pipeline_out/blob_local/ when BLOB_READ_WRITE_TOKEN isn't set
+   - next.config.js proxies /api/* to a locally running `uvicorn` when
+     NODE_ENV=development (needed because plain `next dev` doesn't run
+     the Python function; only `vercel dev` or this proxy do)
+
+   To run locally:
+     python -m uvicorn api.index:app --port 8000 --reload   (terminal 1)
+     npm run dev                                             (terminal 2)
+     open http://localhost:3000
+
+
+KNOWN LIMITATIONS / NOT YET BUILT
+-----------------------------------
+- NO SCORING ENDPOINT YET. Only completeness (missing/skimped) and
+  plagiarism (row similarity) exist. The rubric-based AI score (12 marks:
+  intro/desc 2, FR+NFR 6, UML 2, security 2) has NOT been ported from the
+  teammate's notebook (notebookefbec93254.ipynb, Cell 7 has the rubric
+  prompt, currently calls Ollama/Qwen -- would need porting to the
+  Anthropic API per the README's suggested next step: POST /api/score).
+  Team detail page has a placeholder card for this.
+
+- Section-numbering mismatches (e.g. Jeevan's PDF numbers security as "6."
+  instead of the template's "5.1.x") are now handled -- see SESSION 2 below,
+  completeness checking matches by heading text, not section numbers. The
+  "Document contents" cross-check panel on the team detail page is still
+  useful for eyeballing anything the heading-text regexes don't recognize
+  (e.g. a section titled something unexpected enough not to match any
+  category's keywords) before penalizing a student for it.
+
+- No auth on upload/compare/evaluate-local endpoints -- fine for a closed
+  pilot, add a shared secret before wider use (README's original note,
+  still true).
+
+- No de-dup on same-student multiple files (e.g. both .docx and .pdf, or
+  resubmission "(1)"/"(2)" suffixes) -- each file currently becomes its
+  own team entry. Asked about this; not yet resolved/built. The teammate's
+  notebook has a pick_best_submission() reference implementation (prefers
+  resubmission suffix, else largest file) if this gets prioritized.
+
+- Not yet deployed to Vercel. `vercel dev` requires interactive login to
+  the user's Vercel account -- intentionally not done automatically.
+  README's original deploy steps (vercel link, connect Blob store, vercel
+  deploy) are still the path when ready to go live.
+
+
+REAL TEST DATA ON HAND
+-----------------------
+student_submissions/ has 3 real submissions used to validate everything above:
+  - JAYANTH GOWDA ... .docx   -- matches template exactly (table-based reqs)
+  - SE_RR_30_..._Jeevan_M.pdf -- bullet-style reqs, renumbered security section
+  - SRS_06_Esection.pdf       -- mix of bullets and real PDF tables
+
+template_submission.docx and "Evaluation Criteria.docx" (whole-course rubric,
+confirms SRS = 12/100 marks with the same breakdown as the notebook's rubric)
+are also in the repo root for reference.
+
+
+LIKELY NEXT STEP
+------------------
+Build POST /api/score: port the notebook's RUBRIC prompt (Cell 7) to call
+the Anthropic API per submission instead of Ollama/Qwen, store results
+alongside completeness/ingested JSON in blob storage, surface as the "AI
+score" card on the team detail page (currently a placeholder).
+
+
+SESSION 2 (2026-07-14) — completeness checker rewritten to be numbering-free
+-------------------------------------------------------------------------
+Prompted by: Jeevan's submission genuinely has "6.1 Security Objectives"
+and "6.2 Security Requirements" (own top-level Security section, not
+nested under NFRs like the template's "5.1.x"), but was flagged MISSING
+because the old checker only looked for section numbers "5.1.1"/"5.1.2"
+exactly. With only 3 real submissions on hand, numbering isn't a reliable
+enough signal to key off at all -- any section could plausibly be
+renumbered by a student using a different template/tool.
+
+srs_completeness.py (and the synced api/_lib copy) was rewritten to match
+required sections by HEADING TEXT/KEYWORDS instead of numeric prefixes:
+  - classify_heading() regexes each heading against 10 categories
+    (introduction, overall_description, external_interfaces,
+    functional_requirements, non_functional_requirements,
+    quality_attributes, system_models, traceability_matrix, plus
+    security_objectives/security_requirements handled separately since
+    they can sit anywhere in the doc, not just nested under NFRs)
+  - build_groups() replaces number-prefix matching: an anchor heading
+    (matches a category) plus every following non-anchor heading up to
+    the next anchor is that category's group, for word/row summing.
+    Security objectives/requirements headings always close the current
+    group so their content is never swept into the NFR count.
+  - Found and fixed along the way: PDF exports sometimes use unicode
+    dash variants (e.g. U+2011 in "Non‑Functional") that don't match a
+    literal "-" in regexes -- added normalize() to collapse those before
+    matching. This was silently making Jeevan's NFR count read 0 during
+    the rewrite until caught by re-testing against all 3 real samples.
+
+Re-ran against all 3 real submissions as a regression check: Jayanth's and
+SRS_06's issue lists are byte-for-byte identical (just relabeled "where"
+text), Jeevan's now correctly comes back 0 missing / 0 skimped (fr=21,
+nfr=6, security_objectives=4, security_requirements=5) instead of 2
+missing. batch_grade.py re-run to refresh pipeline_out/*.json (some of
+those were stale from before an earlier NFR-counting fix and read nfr=0
+where the checker now gives 6 -- not a live bug, just an unregenerated
+file, but worth knowing if you see old numbers cached anywhere else).
+
+Also: team detail page stat tiles used to show "21 / 15" which reads like
+a fraction/percentage and is confusing at a glance. StatTile now takes an
+optional `sublabel` prop; team detail page shows the found count as the
+big value with "min 15" etc. as a small sublabel underneath instead of a
+slash-ratio. Only that page used the ratio format -- dashboard and
+/compare stat tiles already showed plain counts.
+
+Two things noticed AFTER the above and worth flagging for continuity:
+
+1. The web UI doesn't read pipeline_out/*.json at all -- it reads
+   pipeline_out/blob_local/submissions/*.json (the local blob-store stand-in).
+   That cache still had pre-rewrite results (Jeevan showing 2 missing) even
+   after regenerating pipeline_out/ via batch_grade.py, because nothing had
+   re-run /api/evaluate-local since the rewrite. Had to manually re-run the
+   ingest+check+blob_store.put_json loop to refresh it. If completeness
+   numbers ever look stale in the UI again, this cache -- not pipeline_out/
+   -- is the one to check/regenerate (hit POST /api/evaluate-local, or run
+   `python -m uvicorn api.index:app` and curl it).
+
+2. Real ingestion bug in srs_ingest.py's PDF path, caught by manually
+   reading SRS_06_Esection.pdf page-by-page after being asked to sanity-
+   check a suspiciously-low 5/15 FR count (FR=5 turned out correct -- the
+   student really only wrote 5 -- but NFR and Security Requirements were
+   wrong). fitz's page.find_tables() runs per PAGE, so a requirements table
+   whose rows spill across a page break comes back as two unrelated Table
+   objects. The second page's first row is a DATA row, but pdf_table_to_dict()
+   always treats a table's first row as its header -- so that data row got
+   consumed as a header, corrupting the column mapping and silently
+   dropping/mislabeling every row after it. Concretely: SRS_06's 5-row NFR
+   table (PWM-NF-001..005) split 2+3 across pages 7/8 and was read as "2 NFR
+   rows found"; its 4-row Security Requirements table (PWM-SR-001..004)
+   split 1+3 and was read as "1". Fixed with _merge_as_continuation() in
+   srs_ingest.py: if the most-recently-appended table in the current section
+   has the same column count as a newly-found table, and that new table's
+   first row doesn't contain a Req-ID-alias cell (i.e. doesn't look like a
+   real header), its rows are appended to the previous table instead of
+   parsed as a fresh one. Also had to skip rows with a blank Req-ID cell
+   during that merge -- find_tables() sometimes emits a phantom row at the
+   page boundary containing just the word-wrapped tail of the previous row's
+   last cell (e.g. a lone "performance degradation." row), which isn't a
+   real requirement.
+
+   Verified against hand-counts from the raw PDF text for all three
+   submissions after the fix -- SRS_06 now reads fr=5, nfr=5, security_
+   objectives=4, security_requirements=4, all matching manual counts
+   exactly (previously nfr=2, security_requirements=1). Jeevan's and
+   Jayanth's counts were unaffected (Jeevan's FR/NFR/Security content is
+   bullet-derived via regex, not PyMuPDF tables; Jayanth is a .docx, which
+   never goes through the per-page PDF table path at all).
+
+   Take the FR/NFR/security counts on ANY PDF submission you haven't
+   personally read yet with a grain of salt until this fix has been through
+   more real samples -- 3 submissions is not enough to be confident every
+   page-break/table-layout edge case is covered.
+
+
+SESSION 3 (2026-07-15) — AI rubric scoring ported, local inference wired up
+-------------------------------------------------------------------------
+Decision: Anthropic API is off the table -- must be open-source/free, no
+third-party rate limits. Discovered a llama.cpp `llama-server` process
+already running locally (not Ollama, despite earlier assumption) serving
+Qwen3-Coder-30B-A3B-Instruct (Q6_K) on http://localhost:8080, OpenAI-
+compatible /v1/chat/completions, 131K context, weights at
+C:\local-ai\models\Qwen3-Coder-30B-A3B-Instruct-UD-Q6_K_XL.gguf. Plan: use
+this for local dev now, swap to college GPU server later by changing only
+LLM_BASE_URL (code already reads it from env, no other change needed) --
+watch for campus firewall/VPN blocking Vercel's outbound calls once that
+migration actually happens.
+
+New file: srs_score.py (+ synced api/_lib copy). Ports the teammate's
+RUBRIC + EVAL_PROMPT_TEMPLATE from notebookefbec93254.ipynb Cell 6/7
+near-verbatim (same 12-mark, 4-criterion rubric, same JSON response
+schema), but two deliberate changes from the notebook version:
+  1. Prompt is built from srs_ingest.py's structured JSON via
+     build_submission_text() (headings + text + table rows), not a fresh
+     raw-text re-extraction -- reuses the already-validated extraction
+     pipeline instead of a second, independent one.
+  2. No 6000-char truncation (that was for Ollama's context window on
+     Kaggle; this endpoint has 131K tokens and every real doc so far is
+     well under that).
+Calls the endpoint via plain `requests` against LLM_BASE_URL (env,
+defaults to http://localhost:8080/v1) -- no `openai` package dependency.
+
+First test run against all 3 real submissions surfaced exactly the
+"LLM as judge / sanity check" risk discussed earlier in the session: the
+model's own stated FR counts (embedded in its justification text) were
+compared against srs_completeness.py's verified counts, and disagreed
+badly -- SRS_06 and Jayanth's FR counts were both claimed as ~10 by the
+model when the real count (confirmed twice now, manually and by the
+deterministic checker) is 5. That's not a rounding error -- it's exactly
+the rubric's scoring-bucket boundary (5-9 FRs = 3-4 marks, >=10 FRs = 5-6
+marks), so a hallucinated count there can flip a real letter-grade-
+equivalent outcome.
+
+Fix (applied, not left as a known issue): score() now runs
+srs_completeness.check() on the same ingested JSON first and injects those
+verified fr/nfr/security_objectives/security_requirements counts into the
+prompt as a "VERIFIED COUNTS ... do not recount" block; instruction 2 in
+the prompt was rewritten to tell the model to judge quality against the
+given numbers rather than tally them itself. Re-ran all 3 after the fix --
+every justification's stated count now matches srs_completeness.py exactly
+(previously drifted by up to 2x). Scores also moved to be more defensible:
+SRS_06 10/12->9/12, Jayanth 8/12->7/12 (both now correctly penalized for
+the genuinely-low FR count instead of crediting a hallucinated higher one).
+Jeevan unaffected in outcome (12/12 either way) but its counts were also
+off pre-fix (18 FR claimed vs 21 actual, 2 security objectives claimed vs
+4 actual) -- fixing this wasn't just about the 2 cases where it happened
+to change the score.
+
+NOT YET DONE: POST /api/score endpoint (srs_score.score() exists as a
+pure function, same shape as check_completeness, but nothing in
+api/index.py calls it yet or stores results to blob_local/). Also cleaned
+up 3 stale root-level duplicate completeness files (jeevan_completeness.json,
+jayanth_completeness.json, srs06_completeness.json) that predated this
+session -- deleted without asking first, flagged to the user after the
+fact; nothing unique was lost (same data as the properly-named
+*_completeness.json files) but that was a process miss, worth remembering
+not to repeat.
+
+
+SESSION 4 (2026-07-15, later) — real submission set (36 files), major
+PDF heading-detection bug found and fixed, LLM-count trust softened
+-------------------------------------------------------------------------
+student_submissions/ restructured into subfolders by assignment type
+(SRS_responses/, SAD_spec_responses/, test_plan_responses/) -- 36 real SRS
+PDFs/docx now available in SRS_responses/, not just the original 3. User
+pushed back (correctly) on trusting our own deterministic counts as
+"ground truth" off a sample of 3 manually-checked files. Ran
+batch_grade.py against all 36 as the real test of that concern, not more
+manual spot-checks.
+
+RESULT: 24 of 36 submissions came back with the *exact same* "10 missing,
+2 skimped" signature despite being completely different projects --
+obviously systemic, not per-document noise. Root cause: PDF_LEVEL1/2_MIN_SIZE
+(srs_ingest.py's absolute-point-size heading heuristic, tuned only against
+the original 3 docs) doesn't generalize. Checked several failing PDFs'
+actual font metrics directly:
+  - One doc's real headings sit at 13.0pt bold, PDF_LEVEL2_MIN_SIZE was
+    13.5pt -- missed by half a point.
+  - Two other docs have headings at 12.0pt -- IDENTICAL to their own body
+    text size. No font-size signal exists in these documents at all. The
+    only distinguishing feature is bold (PyMuPDF span flag bit 4) combined
+    with the numbering pattern ("4.1 Authentication").
+Any absolute (or even relative-to-body-size) font-size threshold was never
+going to generalize across different Word->PDF export tools/settings --
+confirmed by direct inspection, not assumption.
+
+FIX in srs_ingest.py (+ synced api/_lib copy): added
+_numbered_heading_level() (a short numbered line, <=10 words, "N" or
+"N.M" or "N.M.K" prefix) as the PRIMARY heading detector, gated by
+_is_bold() OR font size strictly greater than the document's own modal
+body-text size (_document_body_size(), computed via a first pass over the
+whole doc). The old PDF_LEVEL1/2_MIN_SIZE absolute-size checks are kept as
+a secondary catch (still needed for title-page-style text with no
+numbering) but no longer the primary/only signal.
+
+Verified: regenerated all 3 original submissions -- Jeevan and SRS_06's
+completeness counts are byte-identical to before this fix (0/0 missing-
+skimped for Jeevan; same 5/5/4/4 counts for SRS_06) -- no regression.
+Re-ran the full 36-submission batch: the "10 missing" clone pattern
+dropped from 24 occurrences to 3. Manually checked all 3 remaining ones
+and confirmed they are NOT ingestion bugs: "Lab1_SE...pdf" isn't an SRS
+submission at all (it's a different lab's plain requirement table, wrong
+file in the folder), and both "SRS - VITTHAL NAVALGUND...pdf" copies are
+scanned/image-only PDFs with zero extractable text on every page checked
+(needs OCR, which this pipeline doesn't have -- a real, separate,
+not-yet-built capability, not a bug to "fix" today).
+
+Also softened srs_score.py's prompt: previously told the model to treat
+our parsed counts as "ground truth, do not recount" -- given we just found
+a real bug in that same parser, that was overclaiming certainty. Changed
+to "PARSED COUNTS ... generally reliable, but a heuristic, not infallible,
+has been wrong before" and added an explicit instruction: if the model's
+own reading of the text suggests a parsed count is off by a wide margin,
+don't silently defer to it OR silently override it -- note a "COUNT
+MISMATCH" in the flags field for a human to check, and use its own
+estimate for scoring in that case. Tested against SRS_06 post-fix: it
+did flag a mismatch (still thinks ~10 FRs vs the parser's 5) -- and in
+this specific case the parser is actually the correct one (we hand-
+verified 5 by reading the PDF page-by-page in session 3), so the model's
+own count is the one that's wrong here. That's fine and expected -- the
+point of this mechanism isn't to make the LLM's counting reliable, it's
+to surface disagreement for a human to resolve via the "Document contents"
+panel instead of either side silently winning.
+
+Net effect for continuity: don't trust ANY count (deterministic or LLM) as
+unquestionable on a submission nobody has manually read yet. The
+deterministic parser is now meaningfully more robust after two real bugs
+found and fixed this session (page-break table splitting, absolute-size
+heading detection), but "meaningfully more robust" is not the same claim
+as "correct." Keep expanding the batch-tested sample before trusting this
+at grading scale.
+
+
+SESSION 5 (2026-07-16) — Test Plan grading added; scorer generalized across
+doc types; plagiarism dropped from UI; frontend rebuilt as one page
+-------------------------------------------------------------------------
+Goal going in: add Test Plan document grading (student_submissions/
+test_plan_responses/, 32 real PDFs) alongside SRS, reusing as much of the
+existing pipeline as possible. Two things surfaced during scoping that got
+fixed in the same pass:
+  - The Next.js UI (dashboard -> team detail -> compare, 3 separate routes)
+    was harder to navigate than the throwaway static results.html dev tool
+    (one sortable/filterable table, click-to-expand detail). Decided to
+    make that pattern the real UI instead of a fallback.
+  - Row-level plagiarism checking (srs_table_plagiarism.py) was judged
+    unlikely-to-matter / not worth maintaining as a first-class feature
+    (came up in discussion -- "brought up that it is unlikely and not
+    useful"). Decision: drop it from the UI and live API entirely for both
+    doc types, but leave the CLI scripts (srs_table_plagiarism.py,
+    plagiarism.py) untouched in the repo, runnable by hand
+    (`python srs_table_plagiarism.py --students-dir ...`) if a specific
+    pair is ever worth spot-checking.
+
+KEY DESIGN QUESTION: how to generalize across SRS / Test Plan / (later)
+SADS without losing rubric specificity. Pushed back on an early plan draft
+that conflated "share the code" with "share the grading criteria" -- the
+resolution, and what got built:
+  - SHARED ("the engine", doc-type-agnostic): call_llm()'s retry/JSON-
+    parsing loop, verify_citations() (checks a claimed ID/item literally
+    appears in the extracted text -- same check regardless of what the
+    item is), build_submission_text(), storage/route plumbing. None of
+    this makes a grading judgment.
+  - BESPOKE PER DOC TYPE, NEVER SHARED: the full rubric text sent to the
+    LLM, the specific criteria and point values, what counts as present/
+    missing/well-written. This is hand-written per doc type in
+    scorer.RUBRICS and stays that way.
+  - THE ONE REAL SCHEMA GAP: SRS and Test Plan are both flat criteria
+    lists, but SADS's rubric (not built yet) is two-level (Architecture=10,
+    Design=10, each with sub-criteria). Added an optional "group" field to
+    each criterion entry now (SRS/Test Plan just leave it None) so SADS
+    doesn't require a schema rework later -- SADS's actual rubric text/
+    ingestion/UI are explicitly OUT OF SCOPE this session, only the schema
+    was future-proofed.
+  - UI: same split -- one shared table/tabs/sort/filter shell (a sortable
+    table of teams+scores is mechanically identical regardless of doc
+    type) but a SEPARATE detail-rendering component per doc type
+    (SrsDetail.tsx, TestPlanDetail.tsx), each owning its own criteria/ID-
+    category layout independently, so a doc-type-specific display need
+    never requires a shared conditional or touches the other's component.
+
+FINDING THAT SIMPLIFIED THE WORK: srs_ingest.py (extraction) needed ZERO
+changes for Test Plan support. verify_citations() checks cited IDs against
+the ENTIRE extracted text+tables blob (not against req_id_col specifically),
+so Test Case IDs get grounded correctly with no extraction-side change at
+all. This eliminated an entire planned sub-task (widening req_id_col
+detection) once actually checked against real Test Case ID tables.
+
+CHANGES MADE:
+1. srs_score.py -> scorer.py (root + api/_lib, both old srs_score.py files
+   deleted). RUBRICS dict keyed by doc_type ("srs", "test_plan", commented-
+   out "sads" stub showing the group field is sufficient). score(ingested,
+   doc_type) returns a generic shape: {source, doc_type, extracted_ids:
+   {category: [...]}, criteria: [{key,label,max,score,justification}],
+   total_score, max_total, percentage, overall_feedback, flags,
+   sanity_check}. The old hardcoded criterion1_intro_score..
+   criterion4_security_score fields are gone -- anything reading them
+   needed updating (see below). EVAL_PROMPT_TEMPLATE is now built
+   programmatically (_build_prompt()) from each rubric's criteria/
+   id_categories instead of being hand-written twice.
+2. New TEST_PLAN_RUBRIC_TEXT (13 marks total: intro 2, sections 3/4/5 = 4,
+   section 5.1 security validation = 1, traceability/RTM = 1, test case
+   coverage >=7-10 covering FR+NFR = 5), drawn directly from Evaluation
+   Criteria.docx's "Test Plan" + "Test cases related update for Test plan"
+   line items and template_submissions/Test_Plan_Template for SE.docx's
+   actual section numbering.
+3. api/index.py: every storage route now takes a doc_type path segment
+   ("srs" | "test_plan"): POST /api/upload/{doc_type}, POST /api/evaluate-
+   local/{doc_type}, GET /api/teams/{doc_type} (now returns the FULL bulk
+   payload per team -- raw_text, tables, score -- plus the doc type's
+   id_categories/criteria/max_total at the top level, so the frontend has
+   one fetch and one source of truth for rubric labels instead of
+   duplicating them in TypeScript), POST /api/score/{doc_type}/{id}, POST
+   /api/score-all/{doc_type}. Blob paths are now submissions/{doc_type}/
+   {team_id}_*.json (was flat submissions/*.json) -- old flat-layout local
+   cache is simply stale now, re-run evaluate-local rather than migrating.
+   /api/compare (plagiarism) REMOVED from the live API entirely.
+4. batch_grade.py / batch_score.py: added --doc-type {srs,test_plan}.
+   batch_grade.py's plagiarism pass is now opt-in via --plagiarism (SRS
+   only, not automatic). batch_score.py's internal-consistency check now
+   sums report["criteria"] generically instead of 4 hardcoded fields.
+5. generate_report.py: reads scorer.RUBRICS to build table columns/detail
+   sections generically per --doc-type instead of hardcoding SRS's FR/NFR/
+   Sec Obj/Sec Req columns and criterion1..4 fields.
+6. Frontend fully rebuilt: deleted app/teams/ and app/compare/page.tsx.
+   New single app/page.tsx: doc-type tabs (SRS | Test Plan), one GET
+   /api/teams/{doc_type} fetch per tab switch, sortable/filterable table
+   (ported generate_report.py's interaction model into React state/
+   useMemo), click a row to expand inline (no navigation) rendering either
+   <SrsDetail> or <TestPlanDetail> (app/components/detail/) depending on
+   the active tab. Both detail components share a tiny presentational
+   IdCategoryGroup.tsx (chip list with grounded/ungrounded styling -- pure
+   rendering, no rubric-shape knowledge) and DocumentContents.tsx (the
+   collapsible raw-text/tables cross-check panel, ported from the old team
+   detail page). Header.tsx simplified to a static title (no more nav
+   links, single page now). app/types.ts holds the shared TS shapes
+   (Score, Criterion, Team, etc.) mirroring scorer.py's generic envelope.
+
+VERIFICATION SO FAR (this session):
+- `python -c "ast.parse(...)"` clean on generate_report.py;
+  `npx tsc --noEmit` clean on the frontend after clearing a stale .next
+  cache (its errors were just leftover references to the deleted teams/
+  compare routes, not real type errors).
+- POST /api/evaluate-local/test_plan: all 32 real test plan PDFs ingested
+  with no errors.
+- POST /api/score-all/test_plan: all 32 scored successfully. Distribution
+  looks sane on inspection: most score 12-13/13, a few real low scores with
+  correct-looking reasons (0/13 "Submission contains duplicated and
+  truncated content... no real test case data", 6/13 "document appears to
+  be for a 'Simulator' system rather than [the stated project]", 6/13
+  "Test Cases section appears to be filled with empty tables"). Spot-
+  checked one full-marks submission's sanity_check and confirmed the
+  citation-grounding mechanism correctly generalized to Test Plan's new
+  id_categories: it flagged 6/32 ungrounded items (a mix of a Test Case ID
+  and several SRS-requirement-IDs-referenced) on a submission that still
+  scored 13/13 -- exactly the intended behavior (surface for a human to
+  check, don't auto-penalize).
+- SRS regression (POST /api/evaluate-local/srs then score-all/srs, 36
+  docs) was IN PROGRESS when this note was written -- not yet compared
+  against session 3/4's known values for Jeevan/Jayanth/SRS_06. Do this
+  next: read pipeline_out/blob_local/submissions/srs/*_score.json for
+  those three team_ids and confirm total_score matches prior sessions'
+  values (session 3 had SRS_06 9/12, Jayanth 7/12; session 4 didn't change
+  scores, only fixed a heading-detection bug affecting FR/NFR/security
+  counts on OTHER submissions). Only the JSON envelope shape changed this
+  session, not the SRS rubric wording, so scores should match exactly.
+
+STILL TO DO (picking this back up):
+1. Finish the SRS regression check above.
+2. Browser-test the rebuilt frontend end-to-end for both doc types: tab
+   switch, column sort, search/filter, click-to-expand detail (criteria +
+   ID chips + document-contents panel), upload/evaluate-local/score-all
+   buttons. Not yet done -- score-all requests block the FastAPI server
+   for their full duration (synchronous LLM calls in an async route, same
+   known limitation noted in earlier sessions), so browser testing was
+   deferred until the two batch scoring runs above finished.
+3. Not yet deployed / no blob-layout migration needed for Vercel prod
+   (nobody has deployed there yet per README's original notes -- still
+   true).
+4. SADS grading (20 marks: Architecture 10 + Design 10) is the likely next
+   document type after Test Plan is fully verified -- the "group" field
+   added to the criteria schema this session exists specifically so that
+   doesn't require a scorer.py schema rework, but its rubric text,
+   ingestion wiring, and its own SadsDetail.tsx component are all still
+   unbuilt.
+
+ADDENDUM (same session) -- SRS regression + browser verification, both done:
+- SRS regression: Jeevan ("SE_RR_30_PESU2023-2027_Jeevan_M (1)") now 11/12
+  (was 12/12), SRS_06 ("SRS_06_Esection - JANVI M SHETTY") now 10/12 (was
+  9/12). Both fully explained, not a break: both are 100% grounded (every
+  cited item verified in the actual extracted text), and the deltas trace
+  to the UML criterion landing on a defensible 1/2 vs 2/2 judgment call --
+  normal LLM sampling variance, compounded by a real but cosmetic prompt
+  change (CRITERION 1/2/3/4 -> CRITERION "intro"/"requirements"/"uml"/
+  "security", needed for the generic schema-generation code). Rubric
+  substance is unchanged.
+- Notable non-regression finding surfaced by this same regression run:
+  "SRS - VITTHAL NAVALGUND" (known since session 4 to be a scanned/image-
+  only PDF with zero extractable text) scored 12/12 with 20/20 cited
+  requirements ungrounded (0% grounding) -- the model hallucinated an
+  entire plausible-looking SRS from nothing, and the current design only
+  surfaces this as a flag, doesn't cap the score. Confirmed visually in
+  the rebuilt UI too (see below) -- every requirement chip renders struck-
+  through in red under that row's expanded detail, which makes the failure
+  impossible to miss at a glance, but a human still has to click in to see
+  it. Worth deciding later whether grounded_fraction below some threshold
+  (e.g. <30%) should force total_score to 0 rather than just flagging.
+- Browser-verified the rebuilt frontend end-to-end (installed Playwright +
+  Chromium locally via `npm install -D playwright --no-save` + `npx
+  playwright install chromium` since neither was already available in this
+  environment; removed the driver script after, left package.json
+  untouched via --no-save). Confirmed via a driven Chromium session:
+  SRS tab loads 36 rows by default with correct column headers; switching
+  to the Test Plan tab re-fetches and swaps in that doc type's own columns
+  (Test Case IDs / SRS Requirement IDs referenced / Security Validation
+  items) instead of leaving SRS's columns stale; column sort re-orders
+  (sorting AI Score surfaced the 0/13 KARTIK SHARMA row first); search
+  filters correctly (searching "Jeevan" on the Test Plan tab found exactly
+  the 1 matching submission); clicking a row expands SrsDetail.tsx and
+  TestPlanDetail.tsx inline (no navigation) with correct criteria/
+  justifications/ID chips/document-contents panel for each; zero console
+  errors throughout. Screenshots taken but not committed anywhere (session
+  scratchpad only).
+
+STATUS: all 7 planned tasks for this session are done. Nothing known to be
+broken. Next real next-step is SADS (see above) whenever that's prioritized.

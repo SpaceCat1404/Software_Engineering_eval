@@ -1,0 +1,37 @@
+# Node / Next.js
+node_modules/
+.next/
+next-env.d.ts
+tsconfig.tsbuildinfo
+*.tsbuildinfo
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Local Claude Code settings
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+
+# Generated / local data (regenerable via batch_grade.py / batch_score.py / generate_report.py)
+pipeline_out/
+results.html
+
+# Student submissions (large binaries, privacy-sensitive, not source)
+student_submissions/
+
+# Logs and scratch files
+*.log
+scratch_*
+
+# Env / secrets
+.env
+.env.local
+.env*.local
+
+# OS
+Thumbs.db
+.DS_Store
