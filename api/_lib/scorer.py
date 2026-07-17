@@ -150,6 +150,59 @@ OVERALL GRADING SCALE:
 - If <50% of criteria met -> proportional marks
 """
 
+SADS_RUBRIC_TEXT = """
+You are an expert Software Engineering professor evaluating a student's Software Architecture and Design Specification (SADS) document.
+
+EVALUATION RUBRIC (Total: 20 marks, two sections: Architecture=10, Design=10):
+
+--- ARCHITECTURE (10 marks) ---
+
+CRITERION "component_diagram" — Component (UML) Diagram & Descriptions (Max: 4 marks)
+  A component/class diagram (Section 3.3, may be an embedded image) PLUS prose descriptions of each component's responsibility (Section 3.4).
+  Scoring: 0=missing/template only, 1=only one of diagram-reference or descriptions present, 2=both present but shallow (component names only, no responsibilities), 3=both present with clear per-component responsibilities, 4=both present, clear, and covering every major component of the system described elsewhere in the document
+  NOTE: Give benefit of the doubt for the diagram itself (images may not be extractable from text) — look for a reference/caption ("Figure", "Component Diagram", "Class Diagram") plus the accompanying descriptions.
+
+CRITERION "arch_pattern" — Architecture Pattern & Rationale (Max: 2 marks)
+  A named architecture pattern (e.g. layered, microservices, event-driven, client-server) with a rationale for why it was chosen (and ideally what was rejected and why).
+  Scoring: 0=no pattern named, 1=pattern named but no rationale, or generic boilerplate rationale, 2=pattern named with a specific, project-grounded rationale
+
+CRITERION "arch_traceability" — Traceability to Requirements (Max: 1 mark)
+  An explicit mapping from SRS requirement IDs to architecture components (e.g. "ATM-F-001 (PIN validation) -> Auth Service"), not just a section titled "Traceability" with no real mapping.
+  Scoring: 0=no traceability section or no real ID-to-component mapping, 1=a real mapping exists between at least several requirement IDs and components
+
+CRITERION "arch_security" — Security Architecture (Max: 2 marks)
+  Concrete security architecture content: threat modeling (e.g. STRIDE), specific mitigations mapped to specific threats, or equivalent (auth/authz design, encryption approach, etc.) — not just a generic "we will use HTTPS" line.
+  Scoring: 0=missing/empty, 1=present but generic/shallow (e.g. lists threat categories with no project-specific mitigation), 2=concrete, project-specific threats mapped to concrete mitigations
+
+CRITERION "arch_other" — Other Architecture Sections (Max: 1 mark)
+  Goals & constraints, stakeholders & concerns, technology stack & data stores, risks & mitigations — the remaining Section 3 content not covered by the criteria above.
+  Scoring: 0=largely missing/template only, 1=present with real, project-specific content
+
+--- DESIGN (10 marks) ---
+
+CRITERION "sequence_diagrams" — UML Sequence Diagrams (Max: 4 marks)
+  At least 2 sequence diagrams (may be embedded images), each covering a distinct flow specific to this project (not the template's example flows).
+  Scoring: 0=none, 1=only 1 diagram or only vague mentions, 2=2 diagrams present but generic/template-like flows, 3=2 diagrams present covering distinct project-specific flows, 4=>=2 diagrams, clearly project-specific, covering meaningfully different flows (not trivial variations of the same flow)
+  NOTE: Give benefit of the doubt for the diagrams themselves (images may not be extractable from text) — look for references/captions and the flow description around them.
+
+CRITERION "api_design" — API Design (Max: 3 marks)
+  Interface definitions for at least 2 components: endpoint/method, request shape, response shape, and error cases.
+  Scoring: 0=no API design content, 1=fewer than 2 endpoints defined, or missing request/response/error detail, 2=>=2 endpoints with request/response but weak or missing error cases, 3=>=2 endpoints, each with request, response, AND concrete error cases
+
+CRITERION "error_handling" — Error Handling, Logging & Monitoring (Max: 2 marks)
+  Standardized error handling approach, what gets logged (and what must NOT be logged, e.g. sensitive data), and what gets monitored (specific metrics, not just "we will monitor the system").
+  Scoring: 0=missing/empty, 1=present but generic (no specific metrics/log fields), 2=concrete, project-specific error handling, logging, and monitoring content
+
+CRITERION "design_other" — Other Design Sections (Max: 1 mark)
+  Design overview, UX design, open issues & next steps — the remaining Section 4 content not covered by the criteria above.
+  Scoring: 0=largely missing/template only, 1=present with real, project-specific content
+
+OVERALL GRADING SCALE:
+- If 80% or more of criteria for a section are correctly met -> award 100% of available marks for that section
+- If 50-79% of criteria met -> award 60% of available marks
+- If <50% of criteria met -> proportional marks
+"""
+
 RUBRICS = {
     "srs": {
         "max_total": 12,
@@ -183,24 +236,31 @@ RUBRICS = {
             {"key": "security_validation_items", "label": "Security Validation items"},
         ],
     },
-    # Not implemented yet -- SADS (Software Architecture & Design Spec) has a
-    # two-level rubric (Architecture=10, Design=10, each with its own
-    # sub-criteria). Shown commented out to confirm the "group" field above
-    # is enough to add it later without a schema rework:
-    # "sads": {
-    #     "max_total": 20,
-    #     "criteria": [
-    #         {"key": "component_diagram", "label": "Component diagram & description", "max": 4, "group": "Architecture"},
-    #         {"key": "arch_pattern", "label": "Architecture pattern", "max": 2, "group": "Architecture"},
-    #         {"key": "arch_traceability", "label": "Traceability to requirements", "max": 1, "group": "Architecture"},
-    #         {"key": "arch_security", "label": "Security architecture", "max": 2, "group": "Architecture"},
-    #         {"key": "arch_other", "label": "Other architecture sections", "max": 1, "group": "Architecture"},
-    #         {"key": "sequence_diagrams", "label": "UML sequence diagrams (>=2)", "max": 4, "group": "Design"},
-    #         {"key": "api_design", "label": "API design", "max": 3, "group": "Design"},
-    #         {"key": "error_handling", "label": "Error handling", "max": 2, "group": "Design"},
-    #         {"key": "design_other", "label": "Other design sections", "max": 1, "group": "Design"},
-    #     ],
-    # },
+    # SADS (Software Architecture & Design Spec) -- the one doc type with a
+    # real two-level rubric (Architecture=10, Design=10, each with its own
+    # sub-criteria). Confirms the "group" field above was enough to add this
+    # without a schema rework -- nothing in the shared engine below needed
+    # to change.
+    "sads": {
+        "max_total": 20,
+        "rubric_text": SADS_RUBRIC_TEXT,
+        "criteria": [
+            {"key": "component_diagram", "label": "Component diagram & description", "max": 4, "group": "Architecture"},
+            {"key": "arch_pattern", "label": "Architecture pattern", "max": 2, "group": "Architecture"},
+            {"key": "arch_traceability", "label": "Traceability to requirements", "max": 1, "group": "Architecture"},
+            {"key": "arch_security", "label": "Security architecture", "max": 2, "group": "Architecture"},
+            {"key": "arch_other", "label": "Other architecture sections", "max": 1, "group": "Architecture"},
+            {"key": "sequence_diagrams", "label": "UML sequence diagrams (>=2)", "max": 4, "group": "Design"},
+            {"key": "api_design", "label": "API design", "max": 3, "group": "Design"},
+            {"key": "error_handling", "label": "Error handling", "max": 2, "group": "Design"},
+            {"key": "design_other", "label": "Other design sections", "max": 1, "group": "Design"},
+        ],
+        "id_categories": [
+            {"key": "requirement_ids_referenced", "label": "Requirement IDs referenced (traceability)"},
+            {"key": "api_endpoints", "label": "API endpoints"},
+            {"key": "components", "label": "Components named"},
+        ],
+    },
 }
 
 DOC_TYPES = tuple(RUBRICS.keys())

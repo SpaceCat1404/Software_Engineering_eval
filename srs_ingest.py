@@ -246,6 +246,51 @@ def ingest(path: Path) -> dict:
     return ingest_docx(path)
 
 
+_RESUBMISSION_SUFFIX_RE = re.compile(r"^(.*?)\s*\((\d+)\)$")
+
+
+def resolve_team_id(filename_stem: str) -> tuple:
+    """Split a filename stem into (team_id, resubmission_rank) for duplicate-
+    submission handling. A file re-uploaded/re-downloaded by the OS or an
+    LMS commonly gets an appended " (1)", " (2)", ... suffix -- strip it so
+    "Team A.pdf" and "Team A (1).pdf" resolve to the same team_id, and rank
+    the suffix so a higher number (assumed to be the later resubmission)
+    outranks a lower one, which in turn outranks no suffix at all (rank -1).
+    Doesn't attempt to match genuinely different filenames for the same
+    student (e.g. a renamed resubmission) -- that needs a human, not a
+    filename heuristic."""
+    m = _RESUBMISSION_SUFFIX_RE.match(filename_stem)
+    if m:
+        return m.group(1).strip(), int(m.group(2))
+    return filename_stem, -1
+
+
+def dedupe_by_team_id(paths: list) -> tuple:
+    """Given a list of submission file paths, group by resolve_team_id()'s
+    base team_id and keep only the highest-ranked (latest resubmission) file
+    per team. Returns (winners, skipped) where winners is [(team_id, path),
+    ...] in the same relative order as the input, and skipped is
+    [(team_id, path, reason), ...] for every lower-ranked duplicate that was
+    NOT ingested."""
+    groups: dict = {}
+    for p in paths:
+        team_id, rank = resolve_team_id(p.stem)
+        groups.setdefault(team_id, []).append((rank, p))
+
+    winners = []
+    skipped = []
+    for team_id, entries in groups.items():
+        entries.sort(key=lambda e: e[0])
+        best_rank, best_path = entries[-1]
+        for rank, p in entries[:-1]:
+            skipped.append((team_id, p, f"superseded by {best_path.name} (resubmission rank {rank} < {best_rank})"))
+        winners.append((team_id, best_path))
+
+    order = {p: i for i, p in enumerate(paths)}
+    winners.sort(key=lambda w: order[w[1]])
+    return winners, skipped
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("input_path")

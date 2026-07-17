@@ -23,7 +23,7 @@ import json
 import sys
 from pathlib import Path
 
-from srs_ingest import ingest
+from srs_ingest import ingest, dedupe_by_team_id
 
 SUPPORTED = {".docx", ".pdf"}
 
@@ -31,7 +31,7 @@ SUPPORTED = {".docx", ".pdf"}
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("submissions_dir")
-    ap.add_argument("--doc-type", choices=["srs", "test_plan"], default="srs")
+    ap.add_argument("--doc-type", choices=["srs", "test_plan", "sads"], default="srs")
     ap.add_argument("--output-dir", default="pipeline_out")
     ap.add_argument("--plagiarism", action="store_true",
                      help="also run the row-level plagiarism check (SRS only, opt-in)")
@@ -56,10 +56,18 @@ def main():
 
     print(f"Found {len(files)} submission(s) in {submissions_dir}.", file=sys.stderr)
 
+    winners, skipped_dupes = dedupe_by_team_id(files)
+
     students = []
     summary = []
-    for fp in files:
-        team_id = fp.stem
+    for team_id, fp, reason in skipped_dupes:
+        print(f"  [DUPE] {fp.name}: {reason}", file=sys.stderr)
+        summary.append({"team_id": team_id, "file": fp.name, "skipped": True, "reason": reason})
+    if skipped_dupes:
+        print(f"Skipped {len(skipped_dupes)} duplicate resubmission(s), "
+              f"{len(winners)} unique team(s) remain.", file=sys.stderr)
+
+    for team_id, fp in winners:
         try:
             ingested = ingest(fp)
         except Exception as e:

@@ -3,7 +3,7 @@
 // criteria/id-categories exist differs per doc type, but the shape itself
 // doesn't (see scorer.py's docstring for what's shared vs. bespoke).
 
-export type DocType = "srs" | "test_plan";
+export type DocType = "srs" | "test_plan" | "sads";
 
 export type Criterion = {
   key: string;

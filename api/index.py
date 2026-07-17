@@ -4,8 +4,8 @@ pattern for "Python API alongside a Next.js frontend": one ASGI app, exposed
 as the `app` variable, handling every /api/* path itself).
 
 Every storage-touching route is scoped by a `doc_type` path segment
-("srs" or "test_plan" -- see scorer.RUBRICS) so the same routes/blob layout
-serve both document types without duplicating the app.
+("srs", "test_plan", or "sads" -- see scorer.RUBRICS) so the same routes/
+blob layout serve all document types without duplicating the app.
 
 Routes:
   POST /api/upload/{doc_type}         — one team's .docx/.pdf in -> ingested,
@@ -48,16 +48,17 @@ from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
 import blob_store  # noqa: E402
-from srs_ingest import ingest  # noqa: E402
+from srs_ingest import ingest, resolve_team_id, dedupe_by_team_id  # noqa: E402
 from scorer import score as score_submission, RUBRICS  # noqa: E402
 
 REPO_ROOT = Path(__file__).parent.parent
 DEFAULT_SUBMISSIONS_DIRS = {
     "srs": REPO_ROOT / "student_submissions" / "SRS_responses",
     "test_plan": REPO_ROOT / "student_submissions" / "test_plan_responses",
+    "sads": REPO_ROOT / "student_submissions" / "SAD_spec_responses",
 }
 SUPPORTED_SUFFIXES = (".docx", ".pdf")
-DocType = Literal["srs", "test_plan"]
+DocType = Literal["srs", "test_plan", "sads"]
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -77,6 +78,26 @@ async def upload(doc_type: DocType, file: UploadFile = File(...)):
     if suffix not in SUPPORTED_SUFFIXES:
         raise HTTPException(400, "expected a .docx or .pdf file")
 
+    team_id, rank = resolve_team_id(Path(file.filename).stem)
+
+    # Resubmission check: if this team already has a stored submission,
+    # only overwrite it if the new file outranks the stored one (see
+    # srs_ingest.resolve_team_id -- higher "(N)" suffix = later
+    # resubmission). Otherwise this upload is an older duplicate arriving
+    # after a newer one -- skip it rather than clobbering the real latest
+    # version.
+    existing = blob_store.list_prefix(f"{_prefix(doc_type, team_id)}_ingested")
+    if existing:
+        existing_ingested = blob_store.get_json_by_url(existing[0]["url"])
+        _, existing_rank = resolve_team_id(Path(existing_ingested.get("source", team_id)).stem)
+        if rank <= existing_rank:
+            return {"team_id": team_id, "skipped": True,
+                    "reason": f"a newer submission for this team is already stored "
+                              f"({existing_ingested.get('source')}) -- this upload was not stored"}
+        # Genuinely superseding an existing submission (and, if scored, its
+        # now-stale score) -- archive the old data before overwriting it.
+        blob_store.archive_before_overwrite(_prefix(doc_type, team_id))
+
     data = await file.read()
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         tmp.write(data)
@@ -88,10 +109,9 @@ async def upload(doc_type: DocType, file: UploadFile = File(...)):
         raise HTTPException(400, f"could not parse {suffix}: {e}")
     ingested["source"] = file.filename  # real filename, not the tempfile's random name
 
-    team_id = Path(file.filename).stem
     store_submission(doc_type, team_id, ingested)
 
-    return {"team_id": team_id, "lines": len(ingested["raw_text"].splitlines()),
+    return {"team_id": team_id, "skipped": False, "lines": len(ingested["raw_text"].splitlines()),
             "tables": len(ingested["tables"])}
 
 
@@ -114,9 +134,14 @@ async def evaluate_local(doc_type: DocType, body: EvaluateLocalRequest = Evaluat
     if not files:
         raise HTTPException(400, f"no .docx/.pdf files found in {folder}")
 
+    winners, skipped_dupes = dedupe_by_team_id(files)
+
+    # This batch is about to overwrite every existing ingested/score file
+    # for this doc type -- archive whatever's currently there first.
+    blob_store.archive_before_overwrite(_prefix(doc_type))
+
     results = []
-    for fp in files:
-        team_id = fp.stem
+    for team_id, fp in winners:
         try:
             ingested = ingest(fp)
         except Exception as e:
@@ -128,7 +153,11 @@ async def evaluate_local(doc_type: DocType, body: EvaluateLocalRequest = Evaluat
                          "lines": len(ingested["raw_text"].splitlines()),
                          "tables": len(ingested["tables"])})
 
-    return {"folder": str(folder), "teams": results}
+    for team_id, fp, reason in skipped_dupes:
+        results.append({"team_id": team_id, "file": fp.name, "skipped": True, "reason": reason})
+
+    return {"folder": str(folder), "teams": results,
+            "duplicates_skipped": len(skipped_dupes)}
 
 
 @app.get("/api/teams/{doc_type}")
@@ -166,6 +195,7 @@ async def score_team(doc_type: DocType, team_id: str):
     if not ingested_blobs:
         raise HTTPException(404, "team not found -- ingest it first (upload or evaluate-local)")
     ingested = blob_store.get_json_by_url(ingested_blobs[0]["url"])
+    blob_store.archive_before_overwrite(f"{_prefix(doc_type, team_id)}_score")
     report = score_submission(ingested, doc_type)
     blob_store.put_json(f"{_prefix(doc_type, team_id)}_score.json", report)
     return report
@@ -183,6 +213,11 @@ async def score_all(doc_type: DocType):
         Path(b["pathname"]).stem.replace("_ingested", "")
         for b in blobs if b["pathname"].endswith("_ingested.json")
     })
+
+    # About to overwrite every existing score for this doc type -- archive
+    # the whole doc type's current state in one snapshot first (a single
+    # run folder, not one per team).
+    blob_store.archive_before_overwrite(_prefix(doc_type))
 
     results = []
     for team_id in team_ids:

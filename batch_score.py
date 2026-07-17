@@ -29,7 +29,7 @@ from scorer import score as score_submission
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--pipeline-dir", default="pipeline_out")
-    ap.add_argument("--doc-type", choices=["srs", "test_plan"], default="srs")
+    ap.add_argument("--doc-type", choices=["srs", "test_plan", "sads"], default="srs")
     args = ap.parse_args()
 
     pdir = Path(args.pipeline_dir)

@@ -3,12 +3,14 @@ import { Fragment, useEffect, useMemo, useState } from "react";
 import StatTile from "./components/StatTile";
 import SrsDetail from "./components/detail/SrsDetail";
 import TestPlanDetail from "./components/detail/TestPlanDetail";
+import SadsDetail from "./components/detail/SadsDetail";
 import type { DocType, TeamsResponse, Team } from "./types";
 import { flagTone } from "./types";
 
 const DOC_TYPES: { key: DocType; label: string }[] = [
   { key: "srs", label: "SRS" },
   { key: "test_plan", label: "Test Plan" },
+  { key: "sads", label: "SAD Spec" },
 ];
 
 type FlagFilter = "all" | "unscored" | "flagged" | "lowscore";
@@ -304,7 +306,13 @@ export default function Page() {
                   {isOpen && (
                     <tr className="detail-row">
                       <td colSpan={4 + idCategories.length}>
-                        {docType === "srs" ? <SrsDetail team={t} /> : <TestPlanDetail team={t} />}
+                        {docType === "srs" ? (
+                          <SrsDetail team={t} />
+                        ) : docType === "test_plan" ? (
+                          <TestPlanDetail team={t} />
+                        ) : (
+                          <SadsDetail team={t} />
+                        )}
                       </td>
                     </tr>
                   )}

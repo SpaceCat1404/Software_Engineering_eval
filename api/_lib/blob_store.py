@@ -19,15 +19,54 @@ UI be exercised end-to-end without a Vercel account.
 """
 import json
 import os
+import shutil
+from datetime import datetime
 from pathlib import Path
 
 import requests
 
 LOCAL_BLOB_DIR = Path(__file__).parent.parent.parent / "pipeline_out" / "blob_local"
+CLI_RUNS_DIR = Path(__file__).parent.parent.parent / "pipeline_out" / "cli_runs"
 USE_LOCAL = not os.environ.get("BLOB_READ_WRITE_TOKEN")
 
 if not USE_LOCAL:
     import vercel_blob
+
+
+def archive_before_overwrite(prefix: str) -> Path | None:
+    """Snapshot every local blob file under LOCAL_BLOB_DIR whose relative
+    path starts with `prefix` into a timestamped folder under
+    pipeline_out/cli_runs/, before a batch operation (evaluate-local,
+    score-all, or a superseding single upload/score) overwrites it. `prefix`
+    is a pathname prefix, not necessarily a directory -- e.g.
+    "submissions/sads" (catches a whole doc type's directory) or
+    "submissions/sads/SomeTeam" (catches just that team's *_ingested.json/
+    *_score.json siblings), matching the same prefix convention put_json/
+    list_prefix already use.
+
+    Grading output represents real work (LLM calls, time) and should never
+    just vanish because a later run touched the same path -- this makes
+    "archive the old run before writing the new one" happen automatically
+    instead of relying on nobody ever running rm -rf on live data again.
+    No-op if nothing exists yet at that prefix, or if using real Vercel Blob
+    (which has its own versioning, no local snapshot needed)."""
+    if not USE_LOCAL or not LOCAL_BLOB_DIR.exists():
+        return None
+    matches = [
+        p for p in LOCAL_BLOB_DIR.rglob("*.json")
+        if str(p.relative_to(LOCAL_BLOB_DIR)).replace("\\", "/").startswith(prefix)
+    ]
+    if not matches:
+        return None
+    CLI_RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    next_seq = len(list(CLI_RUNS_DIR.glob("run_*"))) + 1
+    stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    dest_root = CLI_RUNS_DIR / f"run_{next_seq:02d}_{stamp}" / "blob_local"
+    for p in matches:
+        dest = dest_root / p.relative_to(LOCAL_BLOB_DIR)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(p, dest)
+    return dest_root
 
 
 def put_json(pathname: str, obj: dict) -> dict:
