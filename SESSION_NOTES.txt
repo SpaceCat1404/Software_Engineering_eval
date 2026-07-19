@@ -536,3 +536,346 @@ ADDENDUM (same session) -- SRS regression + browser verification, both done:
 
 STATUS: all 7 planned tasks for this session are done. Nothing known to be
 broken. Next real next-step is SADS (see above) whenever that's prioritized.
+
+
+SESSION 6 (2026-07-17) — repo cleanup + git init, SADS rubric implemented,
+duplicate-submission handling, archive-before-overwrite safety net
+-------------------------------------------------------------------------
+Goal going in: SADS grading (the last of the three doc types, see session
+5's note), plus repo hygiene since this was the first session with git
+involved at all.
+
+1. REPO CLEANUP + GIT INIT. Deleted scratch/debug junk (temp/ -- an
+   unrelated saved-webpage dump, notebookefbec93254.ipynb, scratch_*.log/
+   txt, __pycache__/, tsconfig.tsbuildinfo). Reorganized pipeline_out/'s 120
+   loose legacy CLI-pipeline files (from session 1-2's batch_grade.py runs)
+   into pipeline_out/cli_runs/run_01_2026-07-14/ and run_02_2026-07-15/ --
+   pipeline_out/blob_local/ (the live app data store) was NOT touched by
+   this reorg, it's a separate thing (see item 3 below for why that
+   distinction mattered later this session). Moved Evaluation Criteria.docx
+   and SE Project consolidated Marks.xlsx into resources/. Wrote .gitignore
+   (node_modules, .next, __pycache__, pipeline_out/, results.html,
+   student_submissions/ -- large + privacy-sensitive, kept
+   template_submissions/ tracked since those are just 3 small reference
+   docs). git init, initial commit, pushed to
+   github.com/SpaceCat1404/Software_Engineering_eval (main branch).
+
+2. SADS RUBRIC IMPLEMENTED. scorer.py already had a commented-out SADS
+   stub from session 5 (20 marks, Architecture=10/Design=10, two-level --
+   the "group" field was added specifically for this). Verified the stub's
+   criteria/marks against resources/Evaluation Criteria.docx word-for-word
+   (exact match) and template_submissions/SAD_Template.docx's actual
+   section structure (3.3-3.9 map cleanly to the Architecture criteria,
+   4.1-4.6 to Design). Wrote SADS_RUBRIC_TEXT (same style/detail as
+   SRS/Test Plan's), uncommented+completed the RUBRICS["sads"] entry with
+   3 id_categories (requirement_ids_referenced, api_endpoints, components).
+   api/index.py's DocType literal and DEFAULT_SUBMISSIONS_DIRS extended.
+   New app/components/detail/SadsDetail.tsx -- the one detail component
+   that actually uses the "group" field, rendering Architecture/Design as
+   two subtotal sections instead of TestPlanDetail/SrsDetail's flat
+   criteria list. app/page.tsx got a 3rd tab. Ran the real 38-submission
+   SAD_spec_responses/ batch through evaluate-local + score-all: sensible
+   0-17/20 distribution (avg ~14), genuine 0/20s caught for 2 template-only
+   submissions, useful flags surfaced (duplicate section content, one
+   ungrounded citation, one doc-type-mismatch case where a "SADS" file was
+   actually closer to a Test Plan). Browser-verified via Playwright
+   (installed the same --no-save way as session 5): tab loads, sorts,
+   expands with correct Architecture 8/10 / Design 8/10-style subtotal
+   headers, zero console errors.
+
+2b. Also fixed while in scorer.py/api/index.py: batch_grade.py's and
+    batch_score.py's --doc-type argparse choices still hardcoded
+    ["srs","test_plan"] (missing sads) -- both fixed.
+    generate_report.py already derived choices from RUBRICS.keys(), no
+    change needed there.
+
+3. DUPLICATE-SUBMISSION HANDLING (finally fixed a session-3-era known
+   limitation). User asked directly whether same-student-submits-twice was
+   being deduped -- it wasn't, and the SADS batch that had just run
+   surfaced 2 live examples: "SAD_1.0 - J GURUPRASAD...BATCH" +
+   "...BATCH(1)" both scored separately (15/20 each), same for a YOGESH
+   pair (12/20 each). User chose the scope explicitly: filename-suffix
+   matching only (not fuzzy student-name matching -- too risky, could
+   wrongly merge different students), highest-numbered "(N)" suffix wins
+   as the real latest submission.
+   New in srs_ingest.py (+ synced api/_lib copy): resolve_team_id()
+   (strips a trailing " (N)" suffix, ranks it -- no suffix ranks lowest)
+   and dedupe_by_team_id() (groups a file list by that base team_id, keeps
+   only the highest-ranked file per group, returns winners + skipped-with-
+   reason). Wired into all 3 ingestion entry points: evaluate-local (batch
+   folder scan), upload (checks the ALREADY-STORED submission's rank before
+   allowing an overwrite -- an older duplicate arriving after a newer one
+   is rejected, not silently clobbering), and batch_grade.py's CLI folder
+   scan. Verified against the two real J GURUPRASAD/YOGESH pairs: correctly
+   collapses to 1 winner each.
+
+4. INCIDENT: ran `rm -rf pipeline_out/blob_local/submissions/sads` to
+   "clean up" before re-running evaluate-local+score-all to apply the dedup
+   fix, intending to fix 2 duplicate team_ids out of 37. This permanently
+   destroyed ALL 37 teams' scores (35 of which were already correct and
+   didn't need to change) -- no backup existed, nothing had been committed.
+   User caught it ("wait why re-score?") and gave a standing instruction:
+   NEVER delete evaluation output without consultation, never rm -rf it,
+   archive old data into cli_runs before any overwrite instead. Saved as a
+   [[feedback_never_delete_eval_output]] memory. The 35 legitimately-lost
+   scores had to be regenerated (unavoidable -- the old data was gone), but
+   going forward this can't happen silently again:
+   New in api/_lib/blob_store.py: archive_before_overwrite(prefix) --
+   before any local-blob write that would overwrite existing data, copies
+   every matching *.json file into a fresh timestamped
+   pipeline_out/cli_runs/run_NN_<date>_<time>/blob_local/... folder first
+   (prefix-based file matching, same convention put_json/list_prefix
+   already use -- not a directory copytree, so it works for both a whole
+   doc type's prefix and a single team's prefix). No-op if nothing exists
+   yet at that prefix, or if running against real Vercel Blob (has its own
+   versioning). Wired into all 4 write paths in api/index.py: upload (only
+   when genuinely superseding an existing team, not on the reject-as-
+   duplicate path), evaluate-local (one snapshot of the whole doc type
+   before the batch), score (single team), score-all (one snapshot of the
+   whole doc type before the batch, not one per team -- tried that first,
+   caught it myself, it would've made 35 run folders in one call instead of
+   1). Verified live: re-ran score-all/sads for real (necessary this time,
+   see above) and confirmed run_03_2026-07-17_123119 was created
+   immediately, containing exactly the 35 ingested + 2 score files that
+   existed before that call. All 35 teams re-scored successfully after
+   (0-17/20, avg 14.0, same shape as the pre-incident run), frontend
+   re-verified serving the refreshed data correctly.
+
+STATUS: SADS grading is feature-complete and matches SRS/Test Plan's
+maturity level (real batch-tested, browser-verified). Duplicate-submission
+handling now exists for all 3 doc types (shared engine, srs_ingest.py).
+Archive-before-overwrite is now a structural safety net, not just a
+promise, on every local-blob write path. NOT YET DONE by end of session:
+none of session 6's changes are committed to git yet (SADS rubric, dedup
+fix, archive mechanism, and the 2 minor batch_grade.py/batch_score.py
+argparse fixes are all sitting in the working tree). Next real next-step
+after that commit: team grouping / a real backend DB to track teams and
+grade them across assignments (SRS/Test Plan/SADS) instead of 3 independent
+per-doc-type blob namespaces -- discussed as the follow-up to SADS but not
+started this session.
+
+
+SESSION 7 (2026-07-18) -- local dev run docs, hand-graded-marks validation
+attempted and found broken, real team_db.py built to fix it properly
+-------------------------------------------------------------------------
+1. Started both local dev servers on request (uvicorn on :8000, next dev on
+   :3000) and diagnosed a "why are all the values 0" report: not a data bug
+   -- pipeline_out/blob_local/submissions/{srs,test_plan,sads}/ all had real
+   scores on disk, but the FastAPI backend simply wasn't running, so next.js's
+   dev-only /api/* proxy (next.config.js, only active when
+   NODE_ENV=development) had nothing at 127.0.0.1:8000 to forward to and the
+   UI silently defaulted to 0s instead of erroring visibly. Fix was just
+   starting uvicorn; nothing in the app itself was broken. Wrote
+   RUN_LOCALLY.txt (two-terminal start instructions + this proxy gotcha +
+   the LLM_BASE_URL / blob_local caveats) so this doesn't have to be
+   re-diagnosed from scratch next time.
+
+2. Discussed Vercel deploy readiness (no changes made, just an assessment):
+   vercel.json + api/index.py are deploy-ready as Python serverless
+   functions, but two real blockers exist: (a) scorer.py's LLM_BASE_URL
+   defaults to localhost:8080 (the local llama.cpp server) which Vercel's
+   functions obviously can't reach -- scoring has no viable prod backend
+   right now, hosted-API options were already ruled out in session 3 for
+   cost/rate-limit reasons; (b) no Blob store connected yet (BLOB_READ_
+   WRITE_TOKEN unset), so none of the ~100+ already-graded submissions in
+   pipeline_out/blob_local/ carry over to prod automatically -- would need
+   vercel link + a provisioned Blob store + a full evaluate-local+score-all
+   re-run against prod. Also flagged: no auth on the grading endpoints,
+   fine locally, not fine once publicly deployed.
+
+3. Attempted to validate the grader against real hand-graded marks. User
+   uploaded "SE Project consolidated Marks.xlsx" (also already present at
+   resources/, same file) -- 2 sheets (LSection/ESection), Team ID/Team
+   name/marks only populated on a team's FIRST row, with 3 more member-name
+   rows per team below it (not merged cells, just visually grouped -- blank
+   cells on the other rows). 32 teams total, each hand-graded on SRS /12,
+   Test Plan /8, SAD /20 (note: our own rubric maxes are 12/13/20 --
+   test_plan differs, 8 vs our 13, always needs scaling to compare fairly).
+
+   First pass (compare_hand_grades.py) matched each submission filename's
+   parsed student name against individual SPREADSHEET ROWS one at a time.
+   User caught this as wrong on two counts: (a) since marks live only on a
+   team's first row, a submission from any non-first team member matched
+   nothing even though the team's real marks existed on a sibling row; (b)
+   only 26-31 of ~124 individual name-rows matched at all, which was really
+   a symptom of comparing "one submitted PDF" against "one of 4 person-rows"
+   instead of against the team the PDF belongs to. Also found and fixed a
+   real bug in that first script along the way: extract_name_from_filename
+   used re.search (first "PESU" occurrence) instead of the LAST one, so any
+   filename with "PESU" appearing twice (a title fragment plus the real
+   LMS-appended name suffix) silently returned no name at all -- 10/36 SRS
+   files were failing to parse before this fix.
+
+4. Built team_db.py (new, proper fix, not a patch to the old script) --
+   a SQLite DB at pipeline_out/teams.db that is the real "backend DB
+   tracking teams across submissions" the user asked for going forward:
+     - teams: one row per spreadsheet team (32), forward-filled from the
+       4-row block into real team-level fields (section, excel_team_id,
+       team_name, project_id/name, srs/test_plan/sad/test_cases/impl/
+       overall marks).
+     - team_members: every member row under each team, with SRN.
+     - submissions: every actual file in student_submissions/{SRS_responses,
+       test_plan_responses,SAD_spec_responses}, matched to a team_pk via (1)
+       filename-parsed candidate name fuzzy-matched against ALL of a team's
+       members (not just row 1), falling back to (2) actually ingesting the
+       PDF/docx (reusing srs_ingest.ingest()) and searching its extracted
+       text for a literal SRN or member name when the filename alone isn't
+       enough -- this is the "look into the PDFs to ID which team" fallback
+       the user explicitly asked for.
+   Result: 29/32 teams matched per doc type (SRS 35/36 files matched, Test
+   Plan 30/32, SADS 35/37). Remaining gaps are real, not bugs: "Jayanth
+   Reddy Bonugu" appears in 3 submitted files across all 3 doc types but
+   nowhere in the spreadsheet at all (not a matching failure -- he's
+   genuinely not in the professor's roster/marks); a couple other one-off
+   unmatched files likewise have no SRN/name hit in either the filename or
+   the document body. Several teams also surfaced with >1 submitted file
+   for one doc type (e.g. Vivek G has two differently-named SRS files,
+   Kavana H has 4 SADS files) -- these are listed explicitly in the report
+   rather than auto-resolved, since picking the "real" one needs a human
+   judgment call, not a heuristic. Spot-checked the lower-confidence
+   filename matches (e.g. "Karthik Sivaram Jasti" -> team member "Karthik
+   Jasti") directly against the DB and confirmed they're correct, just
+   scored under the 0.85 auto-confidence bar because of a middle name --
+   the threshold is doing its job (surfacing for review) without being
+   wrong.
+
+STILL TO DO (picking this back up next):
+1. Rewrite compare_hand_grades.py (or fold it into team_db.py) to join
+   through teams.db by team_pk instead of the old per-name-row matching --
+   this is what will actually produce the accurate hand-vs-system
+   correlation/stddev numbers the user wants. Not done yet this session --
+   team_db.py only builds and reports match coverage, it doesn't yet pull
+   in our own system scores (pipeline_out/blob_local/submissions/{doc_type}/
+   *_score.json) to compare against the spreadsheet marks.
+2. Decide how to resolve the "teams with >1 submitted file" cases before
+   computing stats -- pick latest by file mtime, ask the user per case, or
+   something else. Explicitly unresolved, don't guess at this silently.
+3. None of this session's changes (RUN_LOCALLY.txt, compare_hand_grades.py,
+   team_db.py) are committed to git yet, and session 6's changes (SADS
+   rubric, dedup fix, archive mechanism) were ALSO still uncommitted coming
+   into this session -- there is now a two-session backlog of uncommitted
+   work sitting in the working tree.
+
+
+SESSION 8 (2026-07-19) -- diagram-eval gap identified, compare_hand_grades.py
+rewritten to actually produce trustworthy hand-vs-system numbers, root cause
+of the biggest disagreements found (OCR gap, not scoring/rubric quality)
+-------------------------------------------------------------------------
+1. DIAGRAM EVAL FINDING (not yet acted on, flagged for later): scorer.py's
+   uml/component_diagram/sequence_diagrams criteria never actually see the
+   diagrams. srs_ingest.py extracts text + tables only, no images, ever --
+   so these 3 criteria are graded purely on whether the surrounding text
+   has a caption/reference ("Figure", "UML", "Component Diagram") plus
+   nearby prose, with an explicit "give benefit of the doubt, images may
+   not be extractable" instruction to the LLM. A submission with the right
+   caption text scores full marks whether or not the actual diagram is
+   present, correct, or copy-pasted from the template -- there is currently
+   no visual verification of diagram content at all. Real fix would mean
+   extracting embedded images (docx: word/media/, pdf: image objects) and
+   sending them to a vision-capable model call; not built, and blocked on
+   checking whether the local llama.cpp/Qwen3-Coder-30B setup even accepts
+   multimodal input. Out of scope for this session, revisit when
+   prioritized.
+
+2. REWROTE compare_hand_grades.py (the session 7 STILL-TO-DO item #1). Old
+   version matched submission filenames against individual spreadsheet
+   ROWS -- wrong, because marks only live on a team's first row. New
+   version joins through pipeline_out/teams.db (team_db.py, built session
+   7): for each doc_type, groups a team's matched submission(s), picks one
+   file per team, looks up that file's score.json by its recorded `source`
+   field (not by assuming a blob-key naming convention -- some older blobs
+   predate the team_id dedup fix and don't follow it), and compares against
+   that team's hand mark column (srs_mark/test_plan_mark/sad_mark) directly
+   from teams.db instead of a second independent spreadsheet read.
+
+   USER DECISION (item #2 from session 7's to-do, previously left
+   unresolved on purpose): for teams with >1 submitted file for the same
+   doc_type (~10 of 32 teams, e.g. Vikhyath's "(1)" resubmission pair,
+   Kavana H's 4 differently-named SADS files), pick_submission() keeps
+   whichever file has the latest filesystem mtime. Simpler dedup rules
+   already in the codebase (srs_ingest.py's filename-suffix ranking) don't
+   cover every real case here (many of these pairs aren't simple "(N)"
+   suffixes on the same base name), so this was a deliberate user call, not
+   inferred.
+
+3. PEARSON CORRELATION REMOVED from the comparison output (user request,
+   correctly identified as the wrong statistic here). Root cause: on Test
+   Plan specifically, 27 of 30 hand-graded marks are exactly 8/8 (the
+   max) -- essentially no variance in the hand-grade side of the pair, so
+   Pearson r is undefined/unstable and gets dominated by whichever 1-2
+   points aren't at the ceiling. Small mean-abs-diff and near-zero
+   correlation aren't contradictory in that situation, they're both
+   symptoms of the same thing (a near-constant hand-grade distribution)
+   and correlation just isn't a meaningful summary of it. Kept mean diff /
+   mean absolute diff / std dev (each also reported as a % of that doc
+   type's hand-graded max) as the only headline stats going forward.
+
+4. HEADLINE ACCURACY NUMBERS (all local submissions, hand marks from SE
+   Project consolidated Marks.xlsx, all 3 doc types):
+     SRS:       mean abs diff 14.4% (1.72/12), std dev 22.8%  (29 teams)
+     Test Plan: mean abs diff 13.4% (1.07/8),  std dev 28.8%  (29 teams)
+     SADS:      mean abs diff 17.5% (3.50/20), std dev 19.7%  (28 teams,
+                1 team's picked file was matched but never actually scored
+                -- J Guruprasad's non-"(1)" copy has no score.json, only
+                its duplicate does)
+
+   FOUND AND ROOT-CAUSED the biggest individual outliers (all 4 of the
+   largest per-doc-type diffs) rather than accepting the raw numbers:
+   ALL FOUR trace to zero/near-zero TEXT EXTRACTION, not bad scoring or a
+   bad rubric judgment call --
+     - VITTHAL NAVALGUND's SAD (Final Destination team): 0 chars extracted
+       -- scanned/image-only PDF, same known issue flagged in session 4 for
+       this student's SRS submission, now confirmed on his SAD submission
+       too. No OCR in the pipeline (known gap, not newly discovered).
+     - YESWANT PADAVALA's SAD (team #14): 0 chars extracted, same failure
+       mode.
+     - AMOGH KULKARNI's Test Plan (sl.ay team): 195 chars extracted, all of
+       it repeated bullet-glyph characters (U+25CF) -- effectively zero
+       usable content, likely another scanned/graphic-heavy PDF PyMuPDF
+       can't read as real text.
+     - KARTIK SHARMA's Test Plan (team #7): 246 chars extracted (title +
+       team member names only, cuts off immediately after) -- same failure
+       class.
+   The scorer gave these 0 given what it was actually handed, which was
+   correct behavior on empty input -- the LLM-as-judge / rubric logic is
+   not what's wrong here. Recomputed the headline stats EXCLUDING just
+   these 4 known-broken-extraction submissions:
+     Test Plan (27 of 29): mean abs diff 7.0%,  std dev 15.4%
+     SADS      (26 of 28): mean abs diff 13.7%, std dev 13.2%
+   i.e. on documents the pipeline actually extracted text from, the system
+   tracks hand grades meaningfully better than the headline numbers
+   suggested -- most of the inflation was one known, pre-existing,
+   previously-flagged ingestion gap, not systemic rubric/LLM unreliability.
+   (SRS wasn't rechecked for its own outlier pattern this session -- its
+   14.4%/22.8% numbers stand as-is, not yet decomposed the same way.)
+
+5. DECIDED NEXT STEP (not yet built, see STILL TO DO): add an OCR fallback
+   to srs_ingest.py -- PyMuPDF has built-in OCR support (get_textpage_ocr(),
+   backed by an installed Tesseract engine) that can be tried per-page only
+   when normal text extraction comes back ~empty, scoped narrowly rather
+   than OCR'ing every page of every submission. Explicitly discussed and
+   separated from a DIFFERENT, unrelated idea floated in the same
+   conversation -- "OCR everything so diagrams get graded correctly" is not
+   what OCR does; OCR only recovers text characters from an image, it
+   cannot evaluate whether a UML/sequence diagram is well-formed or
+   correct. That's the same visual-verification gap as item 1 above and
+   needs a vision-capable model call, not OCR, if it's ever built.
+
+STILL TO DO (picking this back up next):
+1. Build the scanned-page OCR fallback in srs_ingest.py (+ synced
+   api/_lib copy) as scoped in item 5 above. Requires installing a
+   Tesseract backend for PyMuPDF's OCR support locally first (not yet
+   verified as installed in this environment).
+2. Re-run ingestion + scoring for at least the 4 known-broken-extraction
+   submissions above after the OCR fix lands, confirm they stop reading as
+   near-empty, and re-run compare_hand_grades.py to see whether the
+   headline (non-excluded) numbers move toward the excluded-outlier numbers
+   found this session.
+3. Diagram visual verification (item 1) is a real, separate, larger gap --
+   revisit only when explicitly prioritized, needs a multimodal-capable
+   model check first.
+4. This session's own changes (SESSION_NOTES.txt entry, compare_hand_
+   grades.py rewrite, RUN_LOCALLY.txt/team_db.py from session 7 still
+   pending too) are being committed at the end of this session BEFORE the
+   OCR fix, at the user's explicit request, so there's a clean pushable
+   point that doesn't depend on an unbuilt/unverified OCR change.

@@ -1,0 +1,29 @@
+Running the SRS Grader locally
+================================
+
+Two servers are required, in two separate terminals:
+
+Terminal 1 - FastAPI backend (port 8000)
+------------------------------------------
+python -m uvicorn api.index:app --port 8000 --reload
+
+Terminal 2 - Next.js UI (port 3000)
+------------------------------------------
+npm run dev
+
+Then open http://localhost:3000
+
+Notes
+-----
+- next.config.js proxies /api/* to http://127.0.0.1:8000 only when
+  NODE_ENV=development (plain `next dev` doesn't run the Python function
+  itself, only `vercel dev` or this proxy do). If the backend isn't
+  running, the UI will silently show 0s for every score instead of erroring.
+- AI scoring (scorer.py) calls LLM_BASE_URL (defaults to
+  http://localhost:8080/v1) -- this expects a local llama.cpp
+  `llama-server` process serving Qwen3-Coder-30B-A3B-Instruct. Start that
+  separately if you need to run/re-run scoring (POST /api/score*
+  endpoints); completeness/ingestion endpoints work without it.
+- Local dev data lives in pipeline_out/blob_local/ (stands in for Vercel
+  Blob storage when BLOB_READ_WRITE_TOKEN isn't set). Never delete this
+  without consultation -- see SESSION_NOTES.txt session 6 incident.
