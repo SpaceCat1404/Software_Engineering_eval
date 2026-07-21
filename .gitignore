@@ -26,6 +26,11 @@ student_submissions/
 # Logs and scratch files
 *.log
 scratch_*
+eval_output_raw.txt
+
+# Local eval findings (real per-team score deltas, kept local only)
+EVAL_FINDINGS.md
+EVAL_FINDINGS_SUMMARY.docx
 
 # Env / secrets
 .env

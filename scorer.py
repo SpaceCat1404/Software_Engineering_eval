@@ -85,7 +85,7 @@ CRITERION "uml" — UML Use Case Diagram (Max: 2 marks)
   - 0 marks: No UML diagram described or referenced
   - 1 mark: Mention of use case diagram but vague/minimal
   - 2 marks: At least 1 complete UML use case diagram clearly described or embedded
-  NOTE: Diagrams may be images in the document. Look for references like 'Figure', 'Use Case Diagram', or 'UML'.
+  NOTE: Diagrams may be images in the document. Look for references like 'Figure', 'Use Case Diagram', or 'UML' AND check the DIAGRAM EVIDENCE section below for structural confirmation (see "Using diagram evidence" instruction).
 
 CRITERION "security" — Security Section (Max: 2 marks)
   Must contain BOTH:
@@ -160,7 +160,7 @@ EVALUATION RUBRIC (Total: 20 marks, two sections: Architecture=10, Design=10):
 CRITERION "component_diagram" — Component (UML) Diagram & Descriptions (Max: 4 marks)
   A component/class diagram (Section 3.3, may be an embedded image) PLUS prose descriptions of each component's responsibility (Section 3.4).
   Scoring: 0=missing/template only, 1=only one of diagram-reference or descriptions present, 2=both present but shallow (component names only, no responsibilities), 3=both present with clear per-component responsibilities, 4=both present, clear, and covering every major component of the system described elsewhere in the document
-  NOTE: Give benefit of the doubt for the diagram itself (images may not be extractable from text) — look for a reference/caption ("Figure", "Component Diagram", "Class Diagram") plus the accompanying descriptions.
+  NOTE: Check the DIAGRAM EVIDENCE section below for structural confirmation — look for a reference/caption ("Figure", "Component Diagram", "Class Diagram") plus the accompanying descriptions (see "Using diagram evidence" instruction).
 
 CRITERION "arch_pattern" — Architecture Pattern & Rationale (Max: 2 marks)
   A named architecture pattern (e.g. layered, microservices, event-driven, client-server) with a rationale for why it was chosen (and ideally what was rejected and why).
@@ -183,7 +183,7 @@ CRITERION "arch_other" — Other Architecture Sections (Max: 1 mark)
 CRITERION "sequence_diagrams" — UML Sequence Diagrams (Max: 4 marks)
   At least 2 sequence diagrams (may be embedded images), each covering a distinct flow specific to this project (not the template's example flows).
   Scoring: 0=none, 1=only 1 diagram or only vague mentions, 2=2 diagrams present but generic/template-like flows, 3=2 diagrams present covering distinct project-specific flows, 4=>=2 diagrams, clearly project-specific, covering meaningfully different flows (not trivial variations of the same flow)
-  NOTE: Give benefit of the doubt for the diagrams themselves (images may not be extractable from text) — look for references/captions and the flow description around them.
+  NOTE: Check the DIAGRAM EVIDENCE section below for structural confirmation — look for references/captions and the flow description around them (see "Using diagram evidence" instruction).
 
 CRITERION "api_design" — API Design (Max: 3 marks)
   Interface definitions for at least 2 components: endpoint/method, request shape, response shape, and error cases.
@@ -301,6 +301,35 @@ def build_submission_text(ingested: dict) -> str:
     return "\n".join(lines)
 
 
+def _diagram_evidence_text(ingested: dict) -> str:
+    """Structural (not semantic) evidence about embedded diagram images,
+    from diagram_check.py's OpenCV heuristics -- box/ellipse/line counts
+    per image, run at ingest time. This replaces blind "benefit of the
+    doubt for diagrams" scoring: a "Figure 3: Use Case Diagram" caption
+    next to an image with zero box/line/ellipse structure (e.g. a logo, a
+    photo, a blank placeholder) is no longer indistinguishable from a real
+    diagram just because both have a caption."""
+    images = ingested.get("images", [])
+    if not images:
+        return ("No embedded raster images of diagram size (>=150x150) were found. "
+                 "This does NOT rule out a real diagram -- some documents embed diagrams "
+                 "as native vector graphics rather than raster images, which this check "
+                 "can't see. Judge from the surrounding text/captions in that case, but "
+                 "flag it in 'flags' as unverified.")
+    lines = [f"{len(images)} distinct embedded image(s) found (duplicates across pages collapsed); "
+              "automated structural analysis of each (box/ellipse/line counts via OpenCV "
+              "shape detection -- NOT semantic UML validation, just a structural sanity check):"]
+    for i, img in enumerate(images, 1):
+        loc = f"page {img['page']}" if "page" in img else "embedded"
+        rep = f", repeated on {img['repeated_count']} pages" if img.get("repeated_count", 1) > 1 else ""
+        lines.append(
+            f"  Image {i} ({loc}{rep}, {img['width']}x{img['height']}): {img['type_guess']} "
+            f"[boxes={img['n_boxes']}, ellipses={img['n_ellipses']}, lines={img['n_lines']}, "
+            f"has_diagram_structure={img['has_diagram_structure']}]"
+        )
+    return "\n".join(lines)
+
+
 def _document_haystack(ingested: dict) -> str:
     """Everything srs_ingest.py extracted, normalized into one blob to check
     citations against -- the same ground truth the model was given, not a
@@ -336,7 +365,7 @@ def verify_citations(ingested: dict, result: dict, id_categories: list) -> dict:
     }
 
 
-def _build_prompt(doc_type: str, submission_text: str) -> str:
+def _build_prompt(doc_type: str, submission_text: str, ingested: dict) -> str:
     cfg = RUBRICS[doc_type]
     criteria = cfg["criteria"]
     id_categories = cfg["id_categories"]
@@ -350,6 +379,7 @@ def _build_prompt(doc_type: str, submission_text: str) -> str:
         for c in criteria
     )
     extract_categories = ", ".join(cat["label"] for cat in id_categories)
+    diagram_evidence = _diagram_evidence_text(ingested)
 
     return f"""
 {cfg["rubric_text"]}
@@ -357,6 +387,10 @@ def _build_prompt(doc_type: str, submission_text: str) -> str:
 ---
 STUDENT SUBMISSION:
 {submission_text}
+---
+
+DIAGRAM EVIDENCE (automated structural analysis of embedded images, see "Using diagram evidence" instruction below):
+{diagram_evidence}
 ---
 
 Evaluate this document strictly according to the rubric above. Work in two passes:
@@ -378,8 +412,10 @@ restates the score without saying what's actually wrong is not acceptable.
 
 IMPORTANT INSTRUCTIONS:
 1. If the document appears to be an unfilled template (placeholder text like "<< >>", "[description here]", "TBD", or just section headings with no actual content), award 0 for those sections and say so explicitly.
-2. Be strict but fair. Give benefit of the doubt only for diagrams (images may not be extractable from text).
-3. If anything about the submission itself looks off (duplicated blocks, suspiciously templated language, truncated content), note it in "flags". Otherwise "flags" is "None".
+2. Be strict but fair.
+3. Using diagram evidence: a "Figure"/"UML"/diagram caption in the text is NOT by itself proof of a real diagram -- cross-check it against the DIAGRAM EVIDENCE section. An image with has_diagram_structure=true and a type_guess consistent with what the caption claims (e.g. caption says "Use Case Diagram" and the evidence says "use-case-like") is real corroborating evidence -- score normally/generously for that criterion. A caption with NO corresponding image, or only images with has_diagram_structure=false ("no diagram-like structure detected"), means the diagram is NOT confirmed -- do not award full marks on caption text alone; treat it like the "vague/minimal" or "missing" scoring tier for that criterion. This is a structural heuristic (box/line/ellipse counts), not full UML correctness checking, so still use judgment on borderline cases -- but stop defaulting to full benefit of the doubt.
+4. If the DIAGRAM EVIDENCE section reports no images at all (not even unstructured ones) despite the text repeatedly describing/referencing specific diagrams in detail, that's the "vector graphics not raster" edge case noted in the evidence section -- use reasonable judgment from the text description, but say so in "flags" so it can be spot-checked manually.
+5. If anything about the submission itself looks off (duplicated blocks, suspiciously templated language, truncated content), note it in "flags". Otherwise "flags" is "None".
 
 Respond ONLY in this exact JSON format (no other text before or after):
 {{
@@ -430,7 +466,7 @@ def score(ingested: dict, doc_type: str) -> dict:
     id_categories = cfg["id_categories"]
 
     submission_text = build_submission_text(ingested)
-    prompt = _build_prompt(doc_type, submission_text)
+    prompt = _build_prompt(doc_type, submission_text, ingested)
 
     try:
         result = call_llm(prompt)
@@ -496,7 +532,7 @@ def main():
     ingested = json.loads(Path(args.ingested_json).read_text(encoding="utf-8"))
 
     if args.show_prompt:
-        print(_build_prompt(args.doc_type, build_submission_text(ingested)))
+        print(_build_prompt(args.doc_type, build_submission_text(ingested), ingested))
         return
 
     report = score(ingested, args.doc_type)

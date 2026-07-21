@@ -879,3 +879,223 @@ STILL TO DO (picking this back up next):
    pending too) are being committed at the end of this session BEFORE the
    OCR fix, at the user's explicit request, so there's a clean pushable
    point that doesn't depend on an unbuilt/unverified OCR change.
+
+
+SESSION 8b (2026-07-19, same day) -- OCR fallback built and landed, 2 more
+real bugs found along the way, outlier accuracy gap substantially closed
+-------------------------------------------------------------------------
+Picked up item 1 from session 8's STILL TO DO. Tesseract wasn't installed;
+tried `choco install tesseract` myself first but it needs admin rights this
+shell doesn't have (failed on ProgramData lock/permission errors) -- user
+installed it manually via the UB Mannheim installer + winget instead, found
+at `C:\Program Files\Tesseract-OCR` (not on PATH, had to locate it).
+
+1. srs_ingest.py (+ synced api/_lib copy): added an OCR fallback in
+   ingest_pdf(). Per PAGE (not per document), if normal text extraction
+   comes back under OCR_MIN_PAGE_CHARS=40 real characters, retries that
+   page via PyMuPDF's get_textpage_ocr() with an explicit tessdata path
+   (auto-detected via TESSDATA_PREFIX env, `where tesseract`, or the known
+   Program Files install location -- get_textpage_ocr() without an
+   explicit path raised "Tesseract is not installed" even with Tesseract
+   present, needed the explicit tessdata= arg). Only swaps in the OCR
+   result if it actually recovered more text than the normal extraction;
+   silently no-ops (keeps normal-extraction result) if Tesseract isn't
+   found at all, so this degrades gracefully on a machine without it.
+   Tables aren't looked for on OCR'd pages (find_tables() needs real
+   vector structure, meaningless on a flattened scan) -- OCR'd content is
+   treated as plain text lines only. ingest_pdf()'s return dict gains an
+   "ocr_pages" key (list of 1-indexed page numbers) when any page used it,
+   for transparency/debugging, omitted entirely when unused.
+
+   Ran across all 105 local submissions (all 3 doc types): 0 ingestion
+   errors, 16 files triggered OCR on >=1 page (mostly a single trailing/
+   signature page -- harmless, cheap); the 4 outlier submissions from
+   session 8 triggered it on every page, confirming they're fully scanned
+   documents, not a parsing quirk.
+
+2. FOUND AND FIXED (not originally in scope, surfaced while verifying the
+   OCR fix against the 4 known outliers): pdf_table_to_dict() built each
+   row as `{headers[i]: r[i] for i in range(len(headers))}` -- when a
+   table's header cells are blank (KARTIK SHARMA's Test Plan has icon-only
+   headers, no text), every column's key collapses to the same "", so the
+   dict comprehension keeps only the LAST column's value and silently
+   drops the other 9-13 per row. This is why that submission scored 0/13 --
+   NOT a text-extraction gap like the other 3, a completely different bug
+   that happened to produce the same symptom (near-empty content reaching
+   the LLM). Fixed: blank header cells get a positional fallback label
+   ("Column N"), and any repeated label (blank or not) gets disambiguated
+   ("Column N (2)") -- so cells can never collide onto one key again.
+   req_id_col detection reworked to track the header's original index
+   through the relabeling instead of matching on the (possibly now
+   ambiguous) raw header text.
+
+3. FOUND AND WORKED AROUND (also surfaced during verification, also not
+   originally in scope): re-ran evaluate-local for all 3 doc types (cheap,
+   local-only, archived old data first per the standing never-delete-eval-
+   output rule) and rescored just the teams whose ingested content
+   actually changed (~20, not a full-corpus re-score). Vitthal Navalgund's
+   SRS "(1)" file -- the one resolve_team_id's suffix-rank rule picks as
+   the dedupe winner ("higher (N) = newer resubmission") -- turned out to
+   be genuinely corrupted: 0 pages, exactly 1,048,576 bytes (looks like a
+   truncated upload), which OCR obviously can't fix either. The OTHER copy
+   (no suffix, the one the dedupe rule ranks lower) is a perfectly good
+   scanned PDF that OCR recovers fine (15,027 chars). Rather than change
+   the general dedupe rule (a real design decision -- "assume a
+   higher-ranked file might be corrupted, silently fall back to a lower
+   one" has its own failure modes and deserves its own decision, not a
+   quiet patch), manually overrode storage/score for just this one team_id
+   to use the readable file. Flagged to the user before doing even that
+   much, per instruction not to guess silently on ambiguous cases.
+
+RESULT -- all 4 outliers, system score before -> after (hand mark alongside):
+  VITTHAL NAVALGUND SAD:      0/20  -> 10/20   (hand 12/20)
+  YESWANT PADAVALA SAD:       0/20  -> 17/20   (hand 15/20)
+  AMOGH KULKARNI Test Plan:   0/13  -> 13/13   (hand 8/8)
+  KARTIK SHARMA Test Plan:    0/13  -> 11/13   (hand 8/8, header-collision bug not OCR)
+  bonus: VITTHAL NAVALGUND SRS (corrupted-dedupe-winner fix): 12/12 (stale/
+    wrong, was reading the OTHER stale blob) -> 11/12 (real content)
+
+Headline compare_hand_grades.py numbers, before -> after (mean abs diff /
+std dev, as % of each doc type's hand-graded max):
+  SRS:       14.4%/22.8% -> 14.9%/22.8%  (~unchanged, none of SRS's spread
+             was from the 4 known outliers; the corruption fix only moved
+             one row from 0-diff to +1)
+  Test Plan: 13.4%/28.8% -> 7.1%/15.1%   (matches session 8's "outliers
+             excluded" projection of 7.0%/15.4% almost exactly)
+  SADS:      17.5%/19.7% -> 13.6%/13.5%  (matches session 8's projection of
+             13.7%/13.2% almost exactly)
+
+The close match to session 8's "exclude the 4 outliers and see what's left"
+projection is a good sign this diagnosis was right, not a coincidence --
+once the extraction/parsing gap closed, the underlying rubric/LLM scoring
+was already about as close to hand grades as the non-outlier submissions
+always were.
+
+Wrote/updated EVAL_FINDINGS.md (gitignored, local-only -- contains real
+per-team score deltas) with the full before/after tables and root-cause
+writeups for all of the above, per the user's request to keep detailed
+eval results out of git but available locally for reference.
+
+STILL TO DO (picking this back up next):
+1. Diagram visual verification is still the one big unaddressed gap (see
+   session 8 item 1) -- needs image extraction + a multimodal-capable
+   model call, not OCR. Check whether the local llama.cpp/Qwen3-Coder-30B
+   setup even accepts multimodal input before scoping this further.
+2. SRS's own ~15%/23% spread was never decomposed into "known cause(s) vs
+   genuinely-uncertain" the way Test Plan/SADS were this session -- worth
+   the same outlier-hunting treatment.
+3. Only ~20 of 100+ submissions were rescored this session (whichever ones
+   OCR or the header-collision fix actually touched) -- NOT a full
+   score-all across all 3 doc types. The live UI is showing a mix of
+   freshly-rescored and pre-existing scores; a full score-all re-run
+   hasn't happened since these fixes landed (would also pick up any other
+   latent issues, at the cost of re-running the local LLM against every
+   submission again).
+4. srs_ingest.py's OCR fallback and pdf_table_to_dict() fix are NOT yet
+   committed to git -- sitting in the working tree alongside whatever else
+   accumulates before the next commit.
+
+SESSION 9 (2026-07-20) -- diagram structural evidence (stage 1 of 2)
+
+Picked up item 1 above: "checking for presence of the image is not
+sufficient" -- the rubric previously told the LLM to give blanket
+"benefit of the doubt" to any "Figure"/"UML"-captioned text, whether or
+not a real diagram backed it, because the LLM (local Qwen3-Coder-30B via
+llama.cpp) is text-only and no image content ever reached it.
+
+Confirmed the local model has no multimodal path (llama-server serving
+Qwen3-Coder-30B-A3B-Instruct, text completions only), so a true
+vision-LLM semantic check (item 1's original ask) is a separate, bigger
+piece of work -- swapping/adding a VLM to llama-server. Scoped this
+session as stage 1 of 2: structural (not semantic) evidence via OpenCV,
+cheap and fully local, as a real signal instead of blind trust; a VLM
+pass for actual UML-correctness judgment is the natural stage 2, staged
+rather than blocking on it.
+
+Built diagram_check.py (new, root + api/_lib):
+- Extracts every embedded raster image >=150x150px from docx (via
+  python-docx's part.rels, catches floating images too, not just
+  inline) and pdf (via PyMuPDF page.get_images()/Pixmap).
+- Per image: Canny edge detection, HoughLinesP for line count,
+  contour+approxPolyDP for box count (4-vertex convex contours),
+  ellipse fitting for oval count (use-case actors/ovals, interface
+  lollipops) -- all cheap OpenCV, no new inference calls.
+- type_guess heuristic distinguishes use-case (ellipses>=2), sequence
+  (wide aspect ratio + many lines + boxes), and component/class
+  (boxes>=3) diagrams. Verified against 3 real embedded diagrams from an
+  actual SADS submission (1 component diagram, 2 sequence diagrams) --
+  initial box/line-count-only classification confused sequence with
+  component (both have many boxes+lines from participant/component
+  headers); added aspect-ratio as the tiebreaker (sequence diagrams lay
+  participants out side-by-side/wide; component diagrams ran taller in
+  the sample) and it correctly separated all 3.
+- Dedup by content hash: one real submission (group4_projectno40_
+  autodeployers) turned out to be a fully-flattened PDF where the exact
+  same use-case-diagram image was embedded on all 7 pages (a PDF-export
+  artifact, not 7 distinct diagrams) -- without dedup this would have
+  reported "7 embedded diagrams" to the LLM and wildly overcredited
+  diagram coverage. Dedup collapses identical images to one entry with a
+  repeated_count note.
+- Explicitly NOT semantic UML validation -- can't tell a Class diagram
+  from a Component diagram for certain, or check arrow direction is
+  "correct" per UML notation. It's a structural sanity check: does this
+  image have box/line/ellipse structure consistent with SOME diagram, or
+  is it blank/photographic/pure-text with none at all. Also only sees
+  raster images -- a diagram drawn as native vector paths (some
+  draw.io/Visio PDF exports) won't be caught, so an empty result isn't
+  proof there's no diagram; scorer.py's prompt says so explicitly and
+  asks the LLM to flag that case for manual spot-check rather than
+  silently zero the criterion.
+
+Wired into srs_ingest.py's ingest_pdf/ingest_docx: adds an "images" key
+(list of per-image evidence dicts) to the ingested JSON, omitted
+entirely when no qualifying images are found (same pattern as the
+existing "ocr_pages" key).
+
+Wired into scorer.py: new _diagram_evidence_text() renders the "images"
+evidence into a DIAGRAM EVIDENCE prompt section; replaced every "give
+benefit of the doubt for diagrams" rubric NOTE (uml, component_diagram,
+sequence_diagrams criteria) with instructions to cross-check the caption
+against the evidence -- a caption backed by an image with
+has_diagram_structure=true and a matching type_guess is real
+corroboration and scores normally; a caption with no corresponding
+image, or only structureless images, is NOT confirmed and should be
+scored like the "vague/missing" tier, not given a free pass. Added the
+vector-graphics caveat (item above) as an explicit exception path with a
+"flags" note instead of a silent guess either way.
+
+Verified:
+- Ran ingest() across all 105 real submissions (both doc-type dirs, pdf
+  and docx) -- 0 errors, 70/105 produced at least one qualifying
+  embedded image.
+- Spot-checked the 3 extracted images from a real SADS submission
+  visually against their computed type_guess: 1 real component diagram
+  correctly tagged component/class-like, 2 real sequence diagrams
+  correctly tagged sequence-like after the aspect-ratio fix.
+- Spot-checked a real SRS submission's use-case diagram: correctly
+  tagged use-case-like (6 ellipses, 1 box detected) and correctly
+  deduped from 7 repeated-page copies down to 1 evidence entry.
+- --show-prompt confirmed the DIAGRAM EVIDENCE section and the new
+  "Using diagram evidence" instruction render correctly end-to-end in
+  the actual LLM prompt for a sample submission.
+- root and api/_lib copies of srs_ingest.py/scorer.py re-synced
+  (byte-identical diff) after edits, and the new diagram_check.py copied
+  into api/_lib to match. requirements.txt gained
+  opencv-python-headless + numpy.
+
+STILL TO DO:
+1. Stage 2 (semantic/VLM check) not started -- would need a
+   vision-capable local model (e.g. Qwen2.5-VL via llama-server
+   --mmproj) or a cloud vision API call, either a real infra change.
+   Deferred per the user's own "both, staged" choice this session.
+2. No submissions have been rescored against the new DIAGRAM EVIDENCE
+   prompt yet -- this session only verified prompt construction and
+   image analysis output, not actual LLM scoring behavior with the new
+   evidence in front of it. Needs a rescore pass (with the local LLM
+   server running) to see whether it actually changes uml/
+   component_diagram/sequence_diagrams scores and in which direction,
+   plus a compare_hand_grades.py re-run to see if it moves the SADS/SRS
+   accuracy numbers.
+3. None of this session's changes are committed to git yet -- sitting in
+   the working tree alongside the still-uncommitted OCR/table fixes from
+   session 8b.

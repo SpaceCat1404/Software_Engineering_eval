@@ -41,7 +41,9 @@ Usage:
 """
 import argparse
 import json
+import os
 import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -49,6 +51,8 @@ import docx
 import fitz  # PyMuPDF
 from docx.table import Table
 from docx.text.paragraph import Paragraph
+
+import diagram_check
 
 REQ_ID_HEADER_ALIASES = {"req id", "requirement id", "reqid", "id"}
 # Compared with all whitespace stripped -- PDF table extraction wraps header
@@ -133,20 +137,43 @@ def ingest_docx(docx_path: Path) -> dict:
     if synthetic["rows"]:
         tables.append(synthetic)
 
-    return {"source": docx_path.name, "raw_text": "\n".join(text_lines), "tables": tables}
+    result = {"source": docx_path.name, "raw_text": "\n".join(text_lines), "tables": tables}
+    images = diagram_check.extract_and_analyze(docx_path)
+    if images:
+        result["images"] = images
+    return result
 
 
 def pdf_table_to_dict(rows: list) -> dict:
     rows = [[(c or "").strip() for c in r] for r in rows]
     if not rows:
         return {"headers": [], "rows": [], "req_id_col": None, "n_data_rows": 0}
-    headers = rows[0]
+    raw_headers = rows[0]
     data_rows = rows[1:]
-    req_id_col = None
-    for h in headers:
+
+    req_id_idx = None
+    for i, h in enumerate(raw_headers):
         if normalize_header(h) in REQ_ID_HEADER_ALIASES_NORM:
-            req_id_col = h
+            req_id_idx = i
             break
+
+    # Column labels used as dict keys below -- fall back to a positional
+    # label ("Column N") for any blank header cell, and disambiguate repeats,
+    # so cells never collide onto the same key and get silently dropped.
+    # Found on a real submission where every header cell was a blank icon
+    # (not text): every row's dict comprehension was collapsing 10 real
+    # columns down to 1 because they all keyed to "".
+    seen = {}
+    headers = []
+    for i, h in enumerate(raw_headers):
+        label = h if h else f"Column {i + 1}"
+        seen[label] = seen.get(label, 0) + 1
+        if seen[label] > 1:
+            label = f"{label} ({seen[label]})"
+        headers.append(label)
+
+    req_id_col = headers[req_id_idx] if req_id_idx is not None else None
+
     dict_rows = []
     for r in data_rows:
         if not any(cell for cell in r):
@@ -196,47 +223,108 @@ def _merge_as_continuation(tables: list, raw_rows: list) -> bool:
     return True
 
 
+# A page below this many real (non-whitespace) characters from normal text
+# extraction is treated as "nothing here" and retried via OCR -- catches
+# scanned/image-only pages (0 chars) and pages where PyMuPDF only recovers
+# garbage/incidental text (e.g. a handful of bullet glyphs, a title-page
+# fragment) while the actual content is a flattened image. A real body page
+# is always well over this even at just a heading.
+OCR_MIN_PAGE_CHARS = 40
+
+
+def _tessdata_dir() -> str | None:
+    """Locate Tesseract's tessdata folder so PyMuPDF's OCR can find trained
+    language data even when it isn't on PATH/registered where PyMuPDF looks
+    by default -- confirmed necessary on this machine (UB Mannheim installer
+    puts it in Program Files but get_textpage_ocr() without an explicit path
+    still raised 'Tesseract is not installed')."""
+    env = os.environ.get("TESSDATA_PREFIX")
+    if env and Path(env).exists():
+        return env
+    exe = shutil.which("tesseract")
+    if exe:
+        candidate = Path(exe).parent / "tessdata"
+        if candidate.exists():
+            return str(candidate)
+    for candidate in (
+        Path(r"C:\Program Files\Tesseract-OCR\tessdata"),
+        Path(r"C:\Program Files (x86)\Tesseract-OCR\tessdata"),
+    ):
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+_TESSDATA_DIR = _tessdata_dir()
+
+
+def _page_text_lines(page, textpage=None) -> list:
+    """(line_text, line_bbox) pairs for every real text line on a page, read
+    from the given textpage (or the page's own, if None)."""
+    lines = []
+    for block in page.get_text("dict", textpage=textpage)["blocks"]:
+        if block.get("type") != 0:
+            continue
+        for line in block["lines"]:
+            spans = [s for s in line["spans"] if s["text"].strip()]
+            if not spans:
+                continue
+            line_text = "".join(s["text"] for s in spans).strip()
+            lines.append((line_text, fitz.Rect(line["bbox"])))
+    return lines
+
+
 def ingest_pdf(pdf_path: Path) -> dict:
     doc = fitz.open(str(pdf_path))
     text_lines = []
     tables = []
     synthetic = _make_synthetic_table()
+    ocr_pages = []
 
-    for page in doc:
+    for page_num, page in enumerate(doc):
         found_tables = list(page.find_tables().tables)
         table_rects = [(fitz.Rect(t.bbox), t) for t in found_tables]
         used_tables = set()
 
-        for block in page.get_text("dict")["blocks"]:
-            if block.get("type") != 0:
+        lines = _page_text_lines(page)
+        if sum(len(t) for t, _ in lines) < OCR_MIN_PAGE_CHARS and _TESSDATA_DIR:
+            try:
+                ocr_textpage = page.get_textpage_ocr(flags=0, full=True, tessdata=_TESSDATA_DIR)
+                ocr_lines = _page_text_lines(page, textpage=ocr_textpage)
+            except Exception:
+                ocr_lines = []
+            if sum(len(t) for t, _ in ocr_lines) > sum(len(t) for t, _ in lines):
+                lines = ocr_lines
+                table_rects = []  # OCR text has no real vector table structure to align against
+                ocr_pages.append(page_num + 1)
+
+        for line_text, line_bbox in lines:
+            in_table = next((t for rect, t in table_rects if rect.intersects(line_bbox)), None)
+            if in_table is not None:
+                if id(in_table) not in used_tables:
+                    used_tables.add(id(in_table))
+                    raw_rows = in_table.extract()
+                    if not _merge_as_continuation(tables, raw_rows):
+                        tables.append(pdf_table_to_dict(raw_rows))
                 continue
-            for line in block["lines"]:
-                spans = [s for s in line["spans"] if s["text"].strip()]
-                if not spans:
-                    continue
-                line_text = "".join(s["text"] for s in spans).strip()
-                line_bbox = fitz.Rect(line["bbox"])
 
-                in_table = next((t for rect, t in table_rects if rect.intersects(line_bbox)), None)
-                if in_table is not None:
-                    if id(in_table) not in used_tables:
-                        used_tables.add(id(in_table))
-                        raw_rows = in_table.extract()
-                        if not _merge_as_continuation(tables, raw_rows):
-                            tables.append(pdf_table_to_dict(raw_rows))
-                    continue
-
-                m = REQ_LINE_RE.match(line_text)
-                if m:
-                    req_id = re.sub(f"[{DASH_CHARS}]", "-", m.group(1))
-                    synthetic["rows"].append({"Req ID": req_id, "Requirement": m.group(2).strip()})
-                    synthetic["n_data_rows"] += 1
-                text_lines.append(line_text)
+            m = REQ_LINE_RE.match(line_text)
+            if m:
+                req_id = re.sub(f"[{DASH_CHARS}]", "-", m.group(1))
+                synthetic["rows"].append({"Req ID": req_id, "Requirement": m.group(2).strip()})
+                synthetic["n_data_rows"] += 1
+            text_lines.append(line_text)
 
     if synthetic["rows"]:
         tables.append(synthetic)
 
-    return {"source": pdf_path.name, "raw_text": "\n".join(text_lines), "tables": tables}
+    result = {"source": pdf_path.name, "raw_text": "\n".join(text_lines), "tables": tables}
+    if ocr_pages:
+        result["ocr_pages"] = ocr_pages
+    images = diagram_check.extract_and_analyze(pdf_path)
+    if images:
+        result["images"] = images
+    return result
 
 
 def ingest(path: Path) -> dict:
